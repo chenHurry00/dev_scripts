@@ -786,7 +786,7 @@ def view_invoice(invoice_id):
     ).fetchall()
 
     check_report = conn.execute(
-        "SELECT * FROM check_reports WHERE invoice_id = ?", (invoice_id,)
+        "SELECT * FROM check_reports WHERE invoice_id = ? ORDER BY id DESC LIMIT 1", (invoice_id,)
     ).fetchone()
 
     conn.close()
@@ -1180,20 +1180,26 @@ def handle_invoice(invoice_id):
 
             # 保存验收报告
             report_content = request.form.get("report_content", "").strip()
-            report_file = request.files.get("report_file")
+            report_files = request.files.getlist("report_file")
 
-            file_path = None
-            if report_file and report_file.filename:
-                filename = secure_filename(report_file.filename)
-                timestamp = int(time.time() * 1000)
-                new_filename = f"{invoice_id}_check_{timestamp}.{filename.rsplit('.', 1)[-1]}"
-                file_path = app.config["UPLOAD_FOLDER"] / "check_reports" / new_filename
-                report_file.save(file_path)
+            file_paths = []
+            for report_file in report_files:
+                if report_file and report_file.filename:
+                    filename = secure_filename(report_file.filename)
+                    timestamp = int(time.time() * 1000)
+                    ext = filename.rsplit('.', 1)[-1]
+                    new_filename = f"{invoice_id}_check_{timestamp}.{ext}"
+                    file_path = app.config["UPLOAD_FOLDER"] / "check_reports" / new_filename
+                    report_file.save(file_path)
+                    file_paths.append(str(file_path))
+
+            # 将多个文件路径用分号分隔存储
+            file_path_str = ";".join(file_paths) if file_paths else None
 
             conn.execute("""
                 INSERT INTO check_reports (invoice_id, checker_id, checker_name, report_content, file_path)
                 VALUES (?, ?, ?, ?, ?)
-            """, (invoice_id, session["user_id"], session["real_name"], report_content, str(file_path) if file_path else None))
+            """, (invoice_id, session["user_id"], session["real_name"], report_content, file_path_str))
 
             add_history(conn, invoice_id, session["user_id"], session["real_name"],
                        "验收通过", old_status, new_status, notes)
@@ -1249,7 +1255,7 @@ def handle_invoice(invoice_id):
     ).fetchall()
 
     check_report = conn.execute(
-        "SELECT * FROM check_reports WHERE invoice_id = ?", (invoice_id,)
+        "SELECT * FROM check_reports WHERE invoice_id = ? ORDER BY id DESC LIMIT 1", (invoice_id,)
     ).fetchone()
 
     conn.close()
@@ -1508,6 +1514,35 @@ def download_attachment(attachment_id):
     return send_file(file_path, as_attachment=True)
 
 
+@app.route("/download_check_report/<int:invoice_id>/<filename>")
+@login_required
+def download_check_report(invoice_id, filename):
+    """下载验收报告附件"""
+    conn = get_db()
+    check_report = conn.execute(
+        "SELECT file_path FROM check_reports WHERE invoice_id = ? ORDER BY id DESC LIMIT 1", (invoice_id,)
+    ).fetchone()
+    conn.close()
+
+    if not check_report or not check_report["file_path"]:
+        flash("验收报告不存在", "danger")
+        return redirect(url_for("index"))
+
+    # 在文件路径列表中查找匹配的文件
+    file_paths = check_report["file_path"].split(";")
+    target_file = None
+    for file_path in file_paths:
+        if filename in file_path:
+            target_file = Path(file_path)
+            break
+
+    if not target_file or not target_file.exists():
+        flash("文件不存在", "danger")
+        return redirect(url_for("index"))
+
+    return send_file(target_file, as_attachment=True)
+
+
 # ============= HTML Templates =============
 BASE_TEMPLATE = """
 <!DOCTYPE html>
@@ -1682,9 +1717,6 @@ REGISTER_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}", "
                     <div class="mb-3">
                         <label class="form-label">确认密码 <span class="text-danger">*</span></label>
                         <input type="password" class="form-control" name="confirm_password" required>
-                    </div>
-                    <div class="alert alert-info">
-                        <small><i class="bi bi-info-circle"></i> 注册后默认为填报人角色，如需报账权限请联系管理员</small>
                     </div>
                     <button type="submit" class="btn btn-primary w-100">注册</button>
                 </form>
@@ -2445,19 +2477,6 @@ VIEW_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}
 </div>
 {% endif %}
 
-{% if check_report %}
-<div class="card mb-3">
-    <div class="card-header">
-        <h5 class="mb-0">验收报告</h5>
-    </div>
-    <div class="card-body">
-        <p><strong>验收人:</strong> {{ check_report.checker_name }}</p>
-        <p><strong>验收时间:</strong> {{ check_report.checked_at }}</p>
-        <p><strong>报告内容:</strong> {{ check_report.report_content or '无' }}</p>
-    </div>
-</div>
-{% endif %}
-
 <div class="card">
     <div class="card-header">
         <h5 class="mb-0">操作历史</h5>
@@ -2792,6 +2811,27 @@ HANDLE_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock 
 </div>
 {% endif %}
 
+{% if check_report %}
+<div class="card mb-3">
+    <div class="card-header">
+        <h5 class="mb-0">验收报告</h5>
+    </div>
+    <div class="card-body">
+        <p><strong>提交人:</strong> {{ check_report.checker_name }}</p>
+        <p><strong>提交时间:</strong> {{ check_report.checked_at }}</p>
+        <p><strong>报告内容:</strong> {{ check_report.report_content or '无' }}</p>
+        {% if check_report.file_path %}
+        <p><strong>附件:</strong></p>
+        <ul>
+            {% for file_path in check_report.file_path.split(';') %}
+            <li><a href="{{ url_for('download_check_report', invoice_id=invoice.id, filename=file_path.split('/')[-1]) }}" target="_blank">{{ file_path.split('/')[-1] }}</a></li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <div class="card mb-3">
     <div class="card-header">
         <h5 class="mb-0">操作</h5>
@@ -2805,7 +2845,8 @@ HANDLE_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock 
             </div>
             <div class="mb-3">
                 <label class="form-label">验收报告附件</label>
-                <input type="file" class="form-control" name="report_file" accept=".pdf,.jpg,.jpeg,.png">
+                <input type="file" class="form-control" name="report_file" accept=".pdf,.jpg,.jpeg,.png" multiple>
+                <small class="text-muted">可以选择多个文件</small>
             </div>
             <div class="mb-3">
                 <label class="form-label">备注</label>
