@@ -575,18 +575,26 @@ def create_invoice():
             physical_photos = request.form.getlist("physical_photo[]")
             notes_list = request.form.getlist("notes[]")
 
-            if not all([reimburser_name, project_name, item_names, payment_method]):
-                missing = []
-                if not reimburser_name:
-                    missing.append("报销者姓名")
-                if not project_name:
-                    missing.append("项目名称")
-                if not item_names:
-                    missing.append("发票明细")
-                if not payment_method:
-                    missing.append("支付方式")
-                flash(f"请填写必填项：{', '.join(missing)}", "danger")
-                return redirect(url_for("create_invoice"))
+            # 提交备注（用户填写的）
+            submit_notes = request.form.get("submit_notes", "").strip()
+
+            # 保存为草稿还是提交
+            action = request.form.get("action", "draft")
+
+            # 只有提交时才验证必填项
+            if action == "submit":
+                if not all([reimburser_name, project_name, item_names, payment_method]):
+                    missing = []
+                    if not reimburser_name:
+                        missing.append("报销者姓名")
+                    if not project_name:
+                        missing.append("项目名称")
+                    if not item_names:
+                        missing.append("发票明细")
+                    if not payment_method:
+                        missing.append("支付方式")
+                    flash(f"请填写必填项：{', '.join(missing)}", "danger")
+                    return redirect(url_for("create_invoice"))
 
             conn = get_db()
 
@@ -621,10 +629,9 @@ def create_invoice():
             # 自动分类（根据所有明细）
             category, status = calc_category_and_status(items_data)
 
-            # 保存为草稿还是提交
-            action = request.form.get("action", "draft")
+            # 根据action决定状态
             if action == "submit":
-                submitted_at = datetime.now().isoformat()
+                submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             else:
                 status = "draft"
                 submitted_at = None
@@ -723,7 +730,7 @@ def create_invoice():
                     "提交报销单",
                     None,
                     status,
-                    f"总金额: {total_invoice_amount:.2f}元",
+                    submit_notes or "",
                 )
 
             conn.commit()
@@ -784,8 +791,8 @@ def view_invoice(invoice_id):
 
     conn.close()
 
-    # 判断是否可以编辑（草稿状态且是填报人或admin）
-    can_edit = (invoice["status"] == "draft" and
+    # 判断是否可以编辑（草稿或被驳回状态且是填报人或admin）
+    can_edit = (invoice["status"] in ["draft", "rejected"] and
                 (invoice["filler_id"] == session["user_id"] or session["role"] == "admin"))
 
     # 判断是否可以撤回（已提交但未处理的报销单）
@@ -811,14 +818,14 @@ def edit_invoice(invoice_id):
     """编辑草稿"""
     conn = get_db()
 
-    # 检查权限：只能编辑自己的草稿
+    # 检查权限：只能编辑自己的草稿或被驳回的报销单
     invoice = conn.execute(
-        "SELECT * FROM invoices WHERE id = ? AND status = 'draft' AND (filler_id = ? OR ? = 'admin')",
+        "SELECT * FROM invoices WHERE id = ? AND status IN ('draft', 'rejected') AND (filler_id = ? OR ? = 'admin')",
         (invoice_id, session["user_id"], session["role"])
     ).fetchone()
 
     if not invoice:
-        flash("草稿不存在或无权编辑", "danger")
+        flash("报销单不存在或无权编辑", "danger")
         conn.close()
         return redirect(url_for("filler_dashboard"))
 
@@ -840,19 +847,27 @@ def edit_invoice(invoice_id):
             physical_photos = request.form.getlist("physical_photo[]")
             notes_list = request.form.getlist("notes[]")
 
-            if not all([reimburser_name, project_name, item_names, payment_method]):
-                missing = []
-                if not reimburser_name:
-                    missing.append("报销者姓名")
-                if not project_name:
-                    missing.append("项目名称")
-                if not item_names:
-                    missing.append("发票明细")
-                if not payment_method:
-                    missing.append("支付方式")
-                flash(f"请填写必填项：{', '.join(missing)}", "danger")
-                conn.close()
-                return redirect(url_for("edit_invoice", invoice_id=invoice_id))
+            # 提交备注（用户填写的）
+            submit_notes = request.form.get("submit_notes", "").strip()
+
+            # 保存为草稿还是提交
+            action = request.form.get("action", "draft")
+
+            # 只有提交时才验证必填项
+            if action == "submit":
+                if not all([reimburser_name, project_name, item_names, payment_method]):
+                    missing = []
+                    if not reimburser_name:
+                        missing.append("报销者姓名")
+                    if not project_name:
+                        missing.append("项目名称")
+                    if not item_names:
+                        missing.append("发票明细")
+                    if not payment_method:
+                        missing.append("支付方式")
+                    flash(f"请填写必填项：{', '.join(missing)}", "danger")
+                    conn.close()
+                    return redirect(url_for("edit_invoice", invoice_id=invoice_id))
 
             # 计算总金额和分类
             items_data = []
@@ -879,10 +894,9 @@ def edit_invoice(invoice_id):
             # 自动分类（根据所有明细）
             category, status = calc_category_and_status(items_data)
 
-            # 保存为草稿还是提交
-            action = request.form.get("action", "draft")
+            # 根据action决定状态
             if action == "submit":
-                submitted_at = datetime.now().isoformat()
+                submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             else:
                 status = "draft"
                 submitted_at = None
@@ -920,7 +934,7 @@ def edit_invoice(invoice_id):
             if action == "submit":
                 add_history(
                     conn, invoice_id, session["user_id"], session["real_name"],
-                    "提交报销单", "draft", status, "从草稿提交"
+                    "提交报销单", "draft", status, submit_notes or ""
                 )
                 app.logger.info(f"草稿提交: ID={invoice_id}, 填报人={session['real_name']}")
             else:
@@ -942,9 +956,14 @@ def edit_invoice(invoice_id):
         "SELECT * FROM invoice_items WHERE invoice_id = ?", (invoice_id,)
     ).fetchall()
 
+    # 获取历史记录（用于显示驳回原因）
+    history = conn.execute(
+        "SELECT * FROM history WHERE invoice_id = ? ORDER BY created_at DESC", (invoice_id,)
+    ).fetchall()
+
     conn.close()
 
-    return render_template_string(EDIT_INVOICE_TEMPLATE, invoice=invoice, items=items)
+    return render_template_string(EDIT_INVOICE_TEMPLATE, invoice=invoice, items=items, history=history)
 
 
 @app.route("/filler/invoice/<int:invoice_id>/delete", methods=["POST"])
@@ -1772,6 +1791,9 @@ FILLER_DASHBOARD_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endbloc
                     <td>{{ inv.submitted_at or inv.created_at }}</td>
                     <td>
                         <a href="{{ url_for('view_invoice', invoice_id=inv.id) }}" class="btn btn-sm btn-outline-primary">查看</a>
+                        {% if inv.status == 'draft' or inv.status == 'rejected' %}
+                        <a href="{{ url_for('edit_invoice', invoice_id=inv.id) }}" class="btn btn-sm btn-outline-secondary">编辑</a>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -1921,8 +1943,16 @@ CREATE_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock 
         </div>
     </div>
 
+    <div class="card mb-3">
+        <div class="card-body">
+            <label class="form-label">提交备注</label>
+            <textarea name="submit_notes" class="form-control" rows="2" placeholder="选填：提交时的说明或备注"></textarea>
+            <small class="text-muted">此备注将显示在历史记录中</small>
+        </div>
+    </div>
+
     <div class="mb-3">
-        <button type="submit" name="action" value="draft" class="btn btn-secondary">保存草稿</button>
+        <button type="submit" name="action" value="draft" class="btn btn-secondary" formnovalidate>保存草稿</button>
         <button type="submit" name="action" value="submit" class="btn btn-primary">提交</button>
         <a href="{{ url_for('filler_dashboard') }}" class="btn btn-outline-secondary">取消</a>
     </div>
@@ -1931,9 +1961,59 @@ CREATE_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock 
 <script>
 function addItem() {
     const container = document.getElementById('items-container');
-    const template = container.querySelector('.item-row').cloneNode(true);
-    template.querySelectorAll('input').forEach(input => input.value = input.name === 'quantity[]' ? '1' : '');
-    template.querySelectorAll('select').forEach(select => select.selectedIndex = 0);
+    const existingRow = container.querySelector('.item-row');
+
+    let template;
+    if (existingRow) {
+        // 如果有现有行，克隆它
+        template = existingRow.cloneNode(true);
+        template.querySelectorAll('input').forEach(input => input.value = input.name === 'quantity[]' ? '1' : '');
+        template.querySelectorAll('select').forEach(select => select.selectedIndex = 0);
+    } else {
+        // 如果没有现有行，创建新行
+        template = document.createElement('div');
+        template.className = 'item-row border rounded p-3 mb-3';
+        template.innerHTML = `
+            <div class="row g-2">
+                <div class="col-md-3">
+                    <label class="form-label">物品名称 <span class="text-danger">*</span></label>
+                    <input type="text" name="item_name[]" class="form-control" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">单价 <span class="text-danger">*</span></label>
+                    <input type="number" name="unit_price[]" class="form-control" step="0.01" min="0" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">数量 <span class="text-danger">*</span></label>
+                    <input type="number" name="quantity[]" class="form-control" value="1" min="1" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">发票号</label>
+                    <input type="text" name="invoice_number[]" class="form-control">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">支付记录</label>
+                    <input type="text" name="payment_record[]" class="form-control">
+                </div>
+                <div class="col-md-1 d-flex align-items-end">
+                    <button type="button" class="btn btn-danger btn-sm w-100" onclick="removeItem(this)">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="row g-2 mt-2">
+                <div class="col-md-3">
+                    <label class="form-label">实物图链接</label>
+                    <input type="text" name="physical_photo[]" class="form-control">
+                </div>
+                <div class="col-md-9">
+                    <label class="form-label">备注</label>
+                    <input type="text" name="notes[]" class="form-control">
+                </div>
+            </div>
+        `;
+    }
+
     container.appendChild(template);
     updateAttachmentRequirements();
 }
@@ -2033,7 +2113,25 @@ document.addEventListener('input', function(e) {
 
 EDIT_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}", """
 {% block content %}
-<h2 class="mb-4">编辑草稿 #{{ invoice.id }}</h2>
+<h2 class="mb-4">
+    {% if invoice.status == 'rejected' %}
+    重新提交报销单 #{{ invoice.id }} <span class="badge bg-danger">已驳回</span>
+    {% else %}
+    编辑草稿 #{{ invoice.id }}
+    {% endif %}
+</h2>
+
+{% if invoice.status == 'rejected' %}
+<div class="alert alert-danger mb-4">
+    <h5><i class="bi bi-exclamation-triangle"></i> 驳回原因</h5>
+    {% for h in history %}
+        {% if h.action == '驳回' %}
+        <p class="mb-1"><strong>{{ h.operator_name }}</strong> 于 {{ h.created_at }} 驳回：</p>
+        <p class="mb-0">{{ h.notes or '无备注' }}</p>
+        {% endif %}
+    {% endfor %}
+</div>
+{% endif %}
 
 <form method="POST" enctype="multipart/form-data">
     <div class="card mb-3">
@@ -2135,7 +2233,7 @@ EDIT_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}
     </div>
 
     <div class="mb-3">
-        <button type="submit" name="action" value="draft" class="btn btn-secondary">保存草稿</button>
+        <button type="submit" name="action" value="draft" class="btn btn-secondary" formnovalidate>保存草稿</button>
         <button type="submit" name="action" value="submit" class="btn btn-primary">提交</button>
         <a href="{{ url_for('view_invoice', invoice_id=invoice.id) }}" class="btn btn-outline-secondary">取消</a>
     </div>
@@ -2144,8 +2242,58 @@ EDIT_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}
 <script>
 function addItem() {
     const container = document.getElementById('items-container');
-    const template = container.querySelector('.item-row').cloneNode(true);
-    template.querySelectorAll('input').forEach(input => input.value = input.name === 'quantity[]' ? '1' : '');
+    const existingRow = container.querySelector('.item-row');
+
+    let template;
+    if (existingRow) {
+        // 如果有现有行，克隆它
+        template = existingRow.cloneNode(true);
+        template.querySelectorAll('input').forEach(input => input.value = input.name === 'quantity[]' ? '1' : '');
+    } else {
+        // 如果没有现有行，创建新行
+        template = document.createElement('div');
+        template.className = 'item-row border rounded p-3 mb-3';
+        template.innerHTML = `
+            <div class="row g-2">
+                <div class="col-md-3">
+                    <label class="form-label">物品名称 <span class="text-danger">*</span></label>
+                    <input type="text" name="item_name[]" class="form-control" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">单价 <span class="text-danger">*</span></label>
+                    <input type="number" name="unit_price[]" class="form-control" step="0.01" min="0" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">数量 <span class="text-danger">*</span></label>
+                    <input type="number" name="quantity[]" class="form-control" value="1" min="1" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">发票号</label>
+                    <input type="text" name="invoice_number[]" class="form-control">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">支付记录</label>
+                    <input type="text" name="payment_record[]" class="form-control">
+                </div>
+                <div class="col-md-1 d-flex align-items-end">
+                    <button type="button" class="btn btn-danger btn-sm w-100" onclick="removeItem(this)">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="row g-2 mt-2">
+                <div class="col-md-3">
+                    <label class="form-label">实物图链接</label>
+                    <input type="text" name="physical_photo[]" class="form-control">
+                </div>
+                <div class="col-md-9">
+                    <label class="form-label">备注</label>
+                    <input type="text" name="notes[]" class="form-control">
+                </div>
+            </div>
+        `;
+    }
+
     container.appendChild(template);
 }
 </script>
