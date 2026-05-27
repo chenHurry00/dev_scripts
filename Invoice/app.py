@@ -115,6 +115,7 @@ def init_db():
             project_name TEXT NOT NULL,
             invoice_company TEXT,
             purchase_reason TEXT,
+            payment_method TEXT,
             category TEXT NOT NULL,
             status TEXT NOT NULL,
             current_handler TEXT,
@@ -147,6 +148,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS attachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             invoice_id INTEGER NOT NULL,
+            category TEXT NOT NULL,
             file_type TEXT NOT NULL,
             file_path TEXT NOT NULL,
             file_size INTEGER NOT NULL,
@@ -208,6 +210,20 @@ def init_db():
             (ADMIN_USERNAME, admin_hash, "系统管理员", "admin"),
         )
         app.logger.info(f"Admin用户已创建")
+
+    # 数据库迁移：为旧附件表添加category列
+    try:
+        c.execute("SELECT category FROM attachments LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE attachments ADD COLUMN category TEXT NOT NULL DEFAULT 'invoice_file'")
+        app.logger.info("数据库迁移：attachments表添加category列")
+
+    # 数据库迁移：为旧invoices表添加payment_method列
+    try:
+        c.execute("SELECT payment_method FROM invoices LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE invoices ADD COLUMN payment_method TEXT")
+        app.logger.info("数据库迁移：invoices表添加payment_method列")
 
     conn.commit()
     conn.close()
@@ -528,6 +544,7 @@ def create_invoice():
             project_name = request.form.get("project_name", "").strip()
             invoice_company = request.form.get("invoice_company", "").strip()
             purchase_reason = request.form.get("purchase_reason", "").strip()
+            payment_method = request.form.get("payment_method", "").strip()
 
             # 明细信息
             item_names = request.form.getlist("item_name[]")
@@ -538,7 +555,7 @@ def create_invoice():
             physical_photos = request.form.getlist("physical_photo[]")
             notes_list = request.form.getlist("notes[]")
 
-            if not all([reimburser_name, project_name, item_names]):
+            if not all([reimburser_name, project_name, item_names, payment_method]):
                 flash("请填写必填项", "danger")
                 return redirect(url_for("create_invoice"))
 
@@ -588,8 +605,8 @@ def create_invoice():
             cursor = conn.execute(
                 """
                 INSERT INTO invoices (filler_id, filler_name, reimburser_name, project_name,
-                                      invoice_company, purchase_reason, category, status, submitted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      invoice_company, purchase_reason, payment_method, category, status, submitted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     session["user_id"],
@@ -598,6 +615,7 @@ def create_invoice():
                     project_name,
                     invoice_company,
                     purchase_reason,
+                    payment_method,
                     category,
                     status,
                     submitted_at,
@@ -627,45 +645,45 @@ def create_invoice():
                 )
 
             # 处理附件上传
-            files = request.files.getlist("attachments")
-            for file in files:
-                if file and file.filename:
-                    filename = secure_filename(file.filename)
-                    ext = filename.rsplit(".", 1)[-1].lower()
+            attachment_categories = ["invoice_file", "physical_photo", "order_screenshot", "payment_record"]
+            for att_category in attachment_categories:
+                files = request.files.getlist(att_category)
+                for file in files:
+                    if file and file.filename:
+                        filename = secure_filename(file.filename)
+                        ext = filename.rsplit(".", 1)[-1].lower()
 
-                    # 生成唯一文件名
-                    timestamp = int(time.time() * 1000)
-                    hash_name = hashlib.md5(f"{invoice_id}_{timestamp}_{filename}".encode()).hexdigest()[:8]
-                    new_filename = f"{invoice_id}_{timestamp}_{hash_name}.{ext}"
+                        # 生成唯一文件名
+                        timestamp = int(time.time() * 1000)
+                        hash_name = hashlib.md5(f"{invoice_id}_{timestamp}_{filename}".encode()).hexdigest()[:8]
+                        new_filename = f"{invoice_id}_{att_category}_{timestamp}_{hash_name}.{ext}"
 
-                    file_path = app.config["UPLOAD_FOLDER"] / "invoices" / new_filename
+                        file_path = app.config["UPLOAD_FOLDER"] / "invoices" / new_filename
 
-                    # 图片压缩
-                    if ext in ["jpg", "jpeg", "png", "bmp"]:
-                        compressed_data, success = compress_image(file)
-                        if success:
-                            # 压缩成功，保存为WebP
-                            new_filename = new_filename.rsplit(".", 1)[0] + ".webp"
-                            file_path = app.config["UPLOAD_FOLDER"] / "invoices" / new_filename
-                            ext = "webp"
+                        # 图片压缩
+                        if ext in ["jpg", "jpeg", "png", "bmp"]:
+                            compressed_data, success = compress_image(file)
+                            if success:
+                                new_filename = new_filename.rsplit(".", 1)[0] + ".webp"
+                                file_path = app.config["UPLOAD_FOLDER"] / "invoices" / new_filename
+                                ext = "webp"
+                            else:
+                                file_path = app.config["UPLOAD_FOLDER"] / "invoices" / new_filename
+
+                            with open(file_path, "wb") as f:
+                                f.write(compressed_data)
+                            file_size = len(compressed_data)
                         else:
-                            # 压缩失败，保存原图
-                            file_path = app.config["UPLOAD_FOLDER"] / "invoices" / new_filename
+                            file.save(file_path)
+                            file_size = file_path.stat().st_size
 
-                        with open(file_path, "wb") as f:
-                            f.write(compressed_data)
-                        file_size = len(compressed_data)
-                    else:
-                        file.save(file_path)
-                        file_size = file_path.stat().st_size
-
-                    conn.execute(
-                        """
-                        INSERT INTO attachments (invoice_id, file_type, file_path, file_size)
-                        VALUES (?, ?, ?, ?)
-                    """,
-                        (invoice_id, ext, str(file_path), file_size),
-                    )
+                        conn.execute(
+                            """
+                            INSERT INTO attachments (invoice_id, category, file_type, file_path, file_size)
+                            VALUES (?, ?, ?, ?, ?)
+                        """,
+                            (invoice_id, att_category, ext, str(file_path), file_size),
+                        )
 
             # 记录历史
             if action == "submit":
@@ -783,6 +801,7 @@ def edit_invoice(invoice_id):
             project_name = request.form.get("project_name", "").strip()
             invoice_company = request.form.get("invoice_company", "").strip()
             purchase_reason = request.form.get("purchase_reason", "").strip()
+            payment_method = request.form.get("payment_method", "").strip()
 
             # 明细信息
             item_names = request.form.getlist("item_name[]")
@@ -793,7 +812,7 @@ def edit_invoice(invoice_id):
             physical_photos = request.form.getlist("physical_photo[]")
             notes_list = request.form.getlist("notes[]")
 
-            if not all([reimburser_name, project_name, item_names]):
+            if not all([reimburser_name, project_name, item_names, payment_method]):
                 flash("请填写必填项", "danger")
                 conn.close()
                 return redirect(url_for("edit_invoice", invoice_id=invoice_id))
@@ -838,12 +857,12 @@ def edit_invoice(invoice_id):
             conn.execute(
                 """
                 UPDATE invoices SET reimburser_name = ?, project_name = ?,
-                                   invoice_company = ?, purchase_reason = ?,
+                                   invoice_company = ?, purchase_reason = ?, payment_method = ?,
                                    category = ?, status = ?, submitted_at = ?,
                                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """,
-                (reimburser_name, project_name, invoice_company, purchase_reason,
+                (reimburser_name, project_name, invoice_company, purchase_reason, payment_method,
                  category, status, submitted_at, invoice_id)
             )
 
@@ -1797,11 +1816,54 @@ CREATE_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock 
 
     <div class="card mb-3">
         <div class="card-header">
+            <h5 class="mb-0">支付信息</h5>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label class="form-label">支付方式 <span class="text-danger">*</span></label>
+                    <select class="form-control" name="payment_method" id="payment-method" required onchange="updateAttachmentRequirements()">
+                        <option value="">请选择</option>
+                        <option value="corporate_transfer">对公转账</option>
+                        <option value="official_card">公务卡支付</option>
+                        <option value="personal_payment">个人支付</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header">
             <h5 class="mb-0">附件上传</h5>
         </div>
         <div class="card-body">
-            <input type="file" class="form-control" name="attachments" multiple accept="image/*,.pdf">
-            <small class="text-muted">支持图片和PDF，图片将自动压缩</small>
+            <div class="mb-3">
+                <label class="form-label">发票文件 <span class="text-danger">*</span></label>
+                <input type="file" class="form-control" name="invoice_file" multiple accept="image/*,.pdf" required>
+                <small class="text-muted">发票扫描件或照片，支持多文件</small>
+            </div>
+            <div class="mb-3" id="physical-photo-section" style="display:none;">
+                <label class="form-label">实物图 <span class="text-danger" id="physical-required">*</span></label>
+                <input type="file" class="form-control" name="physical_photo" multiple accept="image/*">
+                <small class="text-muted">物品实物照片</small>
+            </div>
+            <div class="mb-3" id="order-screenshot-section" style="display:none;">
+                <label class="form-label">订单截图 <span class="text-danger">*</span></label>
+                <input type="file" class="form-control" name="order_screenshot" multiple accept="image/*,.pdf">
+                <small class="text-muted">电商订单截图</small>
+            </div>
+            <div class="mb-3" id="payment-record-section" style="display:none;">
+                <label class="form-label">支付记录 <span class="text-danger">*</span></label>
+                <input type="file" class="form-control" name="payment_record" multiple accept="image/*,.pdf">
+                <small class="text-muted">支付凭证截图</small>
+            </div>
+            <div id="attachment-hint" class="alert alert-info d-none">
+                <small><i class="bi bi-info-circle"></i> <span id="hint-text"></span></small>
+            </div>
+            <div id="payment-warning" class="alert alert-danger d-none">
+                <small><i class="bi bi-exclamation-triangle"></i> <span id="warning-text"></span></small>
+            </div>
         </div>
     </div>
 
@@ -1819,7 +1881,98 @@ function addItem() {
     template.querySelectorAll('input').forEach(input => input.value = input.name === 'quantity[]' ? '1' : '');
     template.querySelectorAll('select').forEach(select => select.selectedIndex = 0);
     container.appendChild(template);
+    updateAttachmentRequirements();
 }
+
+function getMaxUnitPrice() {
+    const prices = document.querySelectorAll('input[name="unit_price[]"]');
+    let maxPrice = 0;
+    prices.forEach(input => {
+        const val = parseFloat(input.value) || 0;
+        if (val > maxPrice) maxPrice = val;
+    });
+    return maxPrice;
+}
+
+function getTotalAmount() {
+    const prices = document.querySelectorAll('input[name="unit_price[]"]');
+    const quantities = document.querySelectorAll('input[name="quantity[]"]');
+    let total = 0;
+    prices.forEach((input, i) => {
+        const price = parseFloat(input.value) || 0;
+        const qty = parseInt(quantities[i]?.value) || 1;
+        total += price * qty;
+    });
+    return total;
+}
+
+function updateAttachmentRequirements() {
+    const maxPrice = getMaxUnitPrice();
+    const totalAmount = getTotalAmount();
+    const paymentMethod = document.getElementById('payment-method').value;
+
+    // 分类规则：<500材料，500-1000低值品，>=1000资产
+    const isLowValue = maxPrice >= 500 && maxPrice < 1000;
+    const isAsset = maxPrice >= 1000;
+
+    // 实物图：低值品和资产需要
+    const physicalSection = document.getElementById('physical-photo-section');
+    if (isLowValue || isAsset) {
+        physicalSection.style.display = '';
+    } else {
+        physicalSection.style.display = 'none';
+    }
+
+    // 订单截图和支付记录：公务卡支付时需要
+    const orderSection = document.getElementById('order-screenshot-section');
+    const paymentSection = document.getElementById('payment-record-section');
+    if (paymentMethod === 'official_card') {
+        orderSection.style.display = '';
+        paymentSection.style.display = '';
+    } else {
+        orderSection.style.display = 'none';
+        paymentSection.style.display = 'none';
+    }
+
+    // 提示信息
+    const hint = document.getElementById('attachment-hint');
+    const hintText = document.getElementById('hint-text');
+    const hints = [];
+
+    if (isLowValue) {
+        hints.push('低值品：需上传实物图');
+    } else if (isAsset) {
+        hints.push('资产：需上传实物图');
+    }
+
+    if (paymentMethod === 'official_card') {
+        hints.push('公务卡支付：需上传订单截图和支付记录');
+    }
+
+    if (hints.length > 0) {
+        hintText.textContent = hints.join('；');
+        hint.classList.remove('d-none');
+    } else {
+        hint.classList.add('d-none');
+    }
+
+    // 支付方式警告
+    const warning = document.getElementById('payment-warning');
+    const warningText = document.getElementById('warning-text');
+
+    if (totalAmount > 3000 && paymentMethod === 'personal_payment') {
+        warningText.textContent = '个人支付总额超过3000元，必须使用公务卡支付，不能自行垫付';
+        warning.classList.remove('d-none');
+    } else {
+        warning.classList.add('d-none');
+    }
+}
+
+document.addEventListener('input', function(e) {
+    if (e.target.name === 'unit_price[]' || e.target.name === 'quantity[]') {
+        updateAttachmentRequirements();
+    }
+});
 </script>
 {% endblock %}
 """)
@@ -1976,6 +2129,12 @@ VIEW_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}
             </div>
             <div class="col-md-6">
                 <p><strong>购买事由:</strong> {{ invoice.purchase_reason or '无' }}</p>
+                <p><strong>支付方式:</strong>
+                    {% if invoice.payment_method == 'corporate_transfer' %}对公转账
+                    {% elif invoice.payment_method == 'official_card' %}公务卡支付
+                    {% elif invoice.payment_method == 'personal_payment' %}个人支付
+                    {% else %}未填写{% endif %}
+                </p>
                 <p><strong>分类:</strong>
                     {% if invoice.category == 'material' %}材料
                     {% elif invoice.category == 'low_value' %}低值品
@@ -2040,11 +2199,31 @@ VIEW_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}
         <h5 class="mb-0">附件</h5>
     </div>
     <div class="card-body">
-        {% for att in attachments %}
-        <a href="{{ url_for('download_attachment', attachment_id=att.id) }}" class="btn btn-sm btn-outline-primary mb-2">
-            <i class="bi bi-download"></i> 附件{{ loop.index }} ({{ att.file_type }})
-        </a>
+        {% set att_categories = {'invoice_file': '发票文件', 'physical_photo': '实物图', 'order_screenshot': '订单截图', 'payment_record': '支付记录'} %}
+        {% for cat_key, cat_name in att_categories.items() %}
+            {% set cat_files = attachments|selectattr('category', 'equalto', cat_key)|list %}
+            {% if cat_files %}
+            <div class="mb-2">
+                <strong>{{ cat_name }}：</strong>
+                {% for att in cat_files %}
+                <a href="{{ url_for('download_attachment', attachment_id=att.id) }}" class="btn btn-sm btn-outline-primary mb-1">
+                    <i class="bi bi-download"></i> {{ cat_name }}{{ loop.index }}
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
         {% endfor %}
+        {% set other_files = attachments|rejectattr('category', 'in', att_categories.keys())|list %}
+        {% if other_files %}
+        <div class="mb-2">
+            <strong>其他：</strong>
+            {% for att in other_files %}
+            <a href="{{ url_for('download_attachment', attachment_id=att.id) }}" class="btn btn-sm btn-outline-primary mb-1">
+                <i class="bi bi-download"></i> 附件{{ loop.index }}
+            </a>
+            {% endfor %}
+        </div>
+        {% endif %}
     </div>
 </div>
 {% endif %}
@@ -2351,11 +2530,31 @@ HANDLE_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock 
         <h5 class="mb-0">附件</h5>
     </div>
     <div class="card-body">
-        {% for att in attachments %}
-        <a href="{{ url_for('download_attachment', attachment_id=att.id) }}" class="btn btn-sm btn-outline-primary mb-2">
-            <i class="bi bi-download"></i> 附件{{ loop.index }}
-        </a>
+        {% set att_categories = {'invoice_file': '发票文件', 'physical_photo': '实物图', 'order_screenshot': '订单截图', 'payment_record': '支付记录'} %}
+        {% for cat_key, cat_name in att_categories.items() %}
+            {% set cat_files = attachments|selectattr('category', 'equalto', cat_key)|list %}
+            {% if cat_files %}
+            <div class="mb-2">
+                <strong>{{ cat_name }}：</strong>
+                {% for att in cat_files %}
+                <a href="{{ url_for('download_attachment', attachment_id=att.id) }}" class="btn btn-sm btn-outline-primary mb-1">
+                    <i class="bi bi-download"></i> {{ cat_name }}{{ loop.index }}
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
         {% endfor %}
+        {% set other_files = attachments|rejectattr('category', 'in', att_categories.keys())|list %}
+        {% if other_files %}
+        <div class="mb-2">
+            <strong>其他：</strong>
+            {% for att in other_files %}
+            <a href="{{ url_for('download_attachment', attachment_id=att.id) }}" class="btn btn-sm btn-outline-primary mb-1">
+                <i class="bi bi-download"></i> 附件{{ loop.index }}
+            </a>
+            {% endfor %}
+        </div>
+        {% endif %}
     </div>
 </div>
 {% endif %}
