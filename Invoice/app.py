@@ -269,13 +269,33 @@ def role_required(*roles):
 
 
 def auto_classify(unit_price):
-    """根据单价自动分类"""
+    """根据单价返回分类"""
     if unit_price < 500:
-        return "material", "pending_material"
+        return "material"
     elif unit_price < 1000:
-        return "low_value", "pending_check"
+        return "low_value"
     else:
-        return "asset", "pending_check"
+        return "asset"
+
+
+def calc_category_and_status(items_data):
+    """根据所有明细计算综合分类和状态"""
+    categories = set()
+    for item in items_data:
+        categories.add(auto_classify(item["unit_price"]))
+
+    # 状态由最高分类决定
+    if "asset" in categories:
+        status = "pending_check"
+    elif "low_value" in categories:
+        status = "pending_check"
+    else:
+        status = "pending_material"
+
+    # 分类按优先级排序存储
+    order = ["material", "low_value", "asset"]
+    category = ",".join(c for c in order if c in categories)
+    return category, status
 
 
 def compress_image(file_obj, max_width=1920, quality=85):
@@ -556,7 +576,16 @@ def create_invoice():
             notes_list = request.form.getlist("notes[]")
 
             if not all([reimburser_name, project_name, item_names, payment_method]):
-                flash("请填写必填项", "danger")
+                missing = []
+                if not reimburser_name:
+                    missing.append("报销者姓名")
+                if not project_name:
+                    missing.append("项目名称")
+                if not item_names:
+                    missing.append("发票明细")
+                if not payment_method:
+                    missing.append("支付方式")
+                flash(f"请填写必填项：{', '.join(missing)}", "danger")
                 return redirect(url_for("create_invoice"))
 
             conn = get_db()
@@ -574,7 +603,6 @@ def create_invoice():
                 quantity = int(quantities[i])
                 total_amount = unit_price * quantity
 
-                max_unit_price = max(max_unit_price, unit_price)
                 total_invoice_amount += total_amount
 
                 items_data.append(
@@ -590,8 +618,8 @@ def create_invoice():
                     }
                 )
 
-            # 自动分类
-            category, status = auto_classify(max_unit_price)
+            # 自动分类（根据所有明细）
+            category, status = calc_category_and_status(items_data)
 
             # 保存为草稿还是提交
             action = request.form.get("action", "draft")
@@ -813,12 +841,20 @@ def edit_invoice(invoice_id):
             notes_list = request.form.getlist("notes[]")
 
             if not all([reimburser_name, project_name, item_names, payment_method]):
-                flash("请填写必填项", "danger")
+                missing = []
+                if not reimburser_name:
+                    missing.append("报销者姓名")
+                if not project_name:
+                    missing.append("项目名称")
+                if not item_names:
+                    missing.append("发票明细")
+                if not payment_method:
+                    missing.append("支付方式")
+                flash(f"请填写必填项：{', '.join(missing)}", "danger")
                 conn.close()
                 return redirect(url_for("edit_invoice", invoice_id=invoice_id))
 
             # 计算总金额和分类
-            max_unit_price = 0
             items_data = []
 
             for i in range(len(item_names)):
@@ -828,8 +864,6 @@ def edit_invoice(invoice_id):
                 unit_price = float(unit_prices[i])
                 quantity = int(quantities[i])
                 total_amount = unit_price * quantity
-
-                max_unit_price = max(max_unit_price, unit_price)
 
                 items_data.append({
                     "item_name": item_names[i].strip(),
@@ -842,8 +876,8 @@ def edit_invoice(invoice_id):
                     "notes": notes_list[i].strip() if i < len(notes_list) else "",
                 })
 
-            # 自动分类
-            category, status = auto_classify(max_unit_price)
+            # 自动分类（根据所有明细）
+            category, status = calc_category_and_status(items_data)
 
             # 保存为草稿还是提交
             action = request.form.get("action", "draft")
@@ -1026,7 +1060,7 @@ def reimburser_dashboard():
                    (SELECT SUM(total_amount) FROM invoice_items WHERE invoice_id = i.id) as total_amount
             FROM invoices i
             WHERE i.status IN ('reimbursed', 'rejected')
-            AND i.category IN ('material', 'low_value')
+            AND (i.category LIKE '%material%' OR i.category LIKE '%low_value%')
             ORDER BY i.updated_at DESC
             LIMIT 50
         """).fetchall()
@@ -1047,7 +1081,7 @@ def reimburser_dashboard():
                    (SELECT SUM(total_amount) FROM invoice_items WHERE invoice_id = i.id) as total_amount
             FROM invoices i
             WHERE i.status IN ('reimbursed', 'rejected')
-            AND i.category IN ('low_value', 'asset')
+            AND (i.category LIKE '%low_value%' OR i.category LIKE '%asset%')
             ORDER BY i.updated_at DESC
             LIMIT 50
         """).fetchall()
@@ -1112,11 +1146,18 @@ def handle_invoice(invoice_id):
         new_status = old_status
 
         if action == "approve_check":
-            # 资产报账者验收通过
-            if invoice["category"] == "low_value":
-                new_status = "pending_material"
-            elif invoice["category"] == "asset":
+            # 资产报账者验收通过，根据分类决定下一步
+            categories = invoice["category"].split(",") if invoice["category"] else []
+
+            # 优先级：资产 > 低值品 > 材料
+            if "asset" in categories:
                 new_status = "pending_asset"
+            elif "low_value" in categories:
+                new_status = "pending_material"
+            elif "material" in categories:
+                new_status = "pending_material"
+            else:
+                new_status = "pending_material"  # 默认
 
             # 保存验收报告
             report_content = request.form.get("report_content", "").strip()
@@ -1140,9 +1181,18 @@ def handle_invoice(invoice_id):
 
         elif action == "approve_reimburse":
             # 确认报销
-            new_status = "reimbursed"
-            add_history(conn, invoice_id, session["user_id"], session["real_name"],
-                       "确认报销", old_status, new_status, notes)
+            categories = invoice["category"].split(",") if invoice["category"] else []
+
+            # 如果是资产报销阶段，且包含材料/低值品，转到材料报销
+            if invoice["status"] == "pending_asset" and ("material" in categories or "low_value" in categories):
+                new_status = "pending_material"
+                add_history(conn, invoice_id, session["user_id"], session["real_name"],
+                           "资产报销完成", old_status, new_status, notes)
+            else:
+                # 否则直接完成
+                new_status = "reimbursed"
+                add_history(conn, invoice_id, session["user_id"], session["real_name"],
+                           "确认报销", old_status, new_status, notes)
 
         elif action == "reject":
             # 驳回
@@ -1696,9 +1746,13 @@ FILLER_DASHBOARD_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endbloc
                     <td>{{ inv.id }}</td>
                     <td>{{ inv.project_name }}</td>
                     <td>
-                        {% if inv.category == 'material' %}材料
-                        {% elif inv.category == 'low_value' %}低值品
-                        {% else %}资产{% endif %}
+                        {% set cats = inv.category.split(',') if inv.category else [] %}
+                        {% for cat in cats %}
+                            {% if cat == 'material' %}<span class="badge bg-secondary">材料</span>
+                            {% elif cat == 'low_value' %}<span class="badge bg-info">低值品</span>
+                            {% elif cat == 'asset' %}<span class="badge bg-warning">资产</span>
+                            {% endif %}
+                        {% endfor %}
                     </td>
                     <td>
                         {% if inv.status == 'draft' %}
@@ -2010,6 +2064,17 @@ EDIT_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}
                     <textarea class="form-control" name="purchase_reason" rows="2">{{ invoice.purchase_reason or '' }}</textarea>
                 </div>
             </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label class="form-label">支付方式 <span class="text-danger">*</span></label>
+                    <select class="form-control" name="payment_method" id="payment-method" required onchange="updateAttachmentRequirements()">
+                        <option value="">请选择</option>
+                        <option value="corporate_transfer" {% if invoice.payment_method == 'corporate_transfer' %}selected{% endif %}>对公转账</option>
+                        <option value="official_card" {% if invoice.payment_method == 'official_card' %}selected{% endif %}>公务卡支付</option>
+                        <option value="personal_payment" {% if invoice.payment_method == 'personal_payment' %}selected{% endif %}>个人支付</option>
+                    </select>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -2136,9 +2201,13 @@ VIEW_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock %}
                     {% else %}未填写{% endif %}
                 </p>
                 <p><strong>分类:</strong>
-                    {% if invoice.category == 'material' %}材料
-                    {% elif invoice.category == 'low_value' %}低值品
-                    {% else %}资产{% endif %}
+                    {% set cats = invoice.category.split(',') if invoice.category else [] %}
+                    {% for cat in cats %}
+                        {% if cat == 'material' %}<span class="badge bg-secondary">材料</span>
+                        {% elif cat == 'low_value' %}<span class="badge bg-info">低值品</span>
+                        {% elif cat == 'asset' %}<span class="badge bg-warning">资产</span>
+                        {% endif %}
+                    {% endfor %}
                 </p>
                 <p><strong>状态:</strong>
                     {% if invoice.status == 'draft' %}
@@ -2317,9 +2386,13 @@ REIMBURSER_DASHBOARD_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% end
                             <td>{{ inv.reimburser_name }}</td>
                             <td>{{ inv.total_amount }}</td>
                             <td>
-                                {% if inv.category == 'material' %}材料
-                                {% elif inv.category == 'low_value' %}低值品
-                                {% else %}资产{% endif %}
+                                {% set cats = inv.category.split(',') if inv.category else [] %}
+                                {% for cat in cats %}
+                                    {% if cat == 'material' %}<span class="badge bg-secondary">材料</span>
+                                    {% elif cat == 'low_value' %}<span class="badge bg-info">低值品</span>
+                                    {% elif cat == 'asset' %}<span class="badge bg-warning">资产</span>
+                                    {% endif %}
+                                {% endfor %}
                             </td>
                             <td>
                                 {% if inv.status == 'pending_check' %}
@@ -2372,9 +2445,13 @@ REIMBURSER_DASHBOARD_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% end
                             <td>{{ inv.reimburser_name }}</td>
                             <td>{{ inv.total_amount }}</td>
                             <td>
-                                {% if inv.category == 'material' %}材料
-                                {% elif inv.category == 'low_value' %}低值品
-                                {% else %}资产{% endif %}
+                                {% set cats = inv.category.split(',') if inv.category else [] %}
+                                {% for cat in cats %}
+                                    {% if cat == 'material' %}<span class="badge bg-secondary">材料</span>
+                                    {% elif cat == 'low_value' %}<span class="badge bg-info">低值品</span>
+                                    {% elif cat == 'asset' %}<span class="badge bg-warning">资产</span>
+                                    {% endif %}
+                                {% endfor %}
                             </td>
                             <td>
                                 {% if inv.status == 'pending_check' %}
@@ -2427,9 +2504,13 @@ REIMBURSER_DASHBOARD_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% end
                             <td>{{ inv.reimburser_name }}</td>
                             <td>{{ inv.total_amount }}</td>
                             <td>
-                                {% if inv.category == 'material' %}材料
-                                {% elif inv.category == 'low_value' %}低值品
-                                {% else %}资产{% endif %}
+                                {% set cats = inv.category.split(',') if inv.category else [] %}
+                                {% for cat in cats %}
+                                    {% if cat == 'material' %}<span class="badge bg-secondary">材料</span>
+                                    {% elif cat == 'low_value' %}<span class="badge bg-info">低值品</span>
+                                    {% elif cat == 'asset' %}<span class="badge bg-warning">资产</span>
+                                    {% endif %}
+                                {% endfor %}
                             </td>
                             <td>
                                 {% if inv.status == 'reimbursed' %}
@@ -2476,9 +2557,13 @@ HANDLE_INVOICE_TEMPLATE = BASE_TEMPLATE.replace("{% block content %}{% endblock 
             </div>
             <div class="col-md-6">
                 <p><strong>分类:</strong>
-                    {% if invoice.category == 'material' %}材料
-                    {% elif invoice.category == 'low_value' %}低值品
-                    {% else %}资产{% endif %}
+                    {% set cats = invoice.category.split(',') if invoice.category else [] %}
+                    {% for cat in cats %}
+                        {% if cat == 'material' %}<span class="badge bg-secondary">材料</span>
+                        {% elif cat == 'low_value' %}<span class="badge bg-info">低值品</span>
+                        {% elif cat == 'asset' %}<span class="badge bg-warning">资产</span>
+                        {% endif %}
+                    {% endfor %}
                 </p>
                 <p><strong>当前状态:</strong>
                     {% if invoice.status == 'pending_check' %}
