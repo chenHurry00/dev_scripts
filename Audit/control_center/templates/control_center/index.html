@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>中控台 - 服务器列表</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+        }
+
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 15px 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .header h1 {
+            font-size: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+
+        .actions {
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 14px;
+        }
+
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .btn-success {
+            background: #27ae60;
+            color: white;
+        }
+
+        .alert {
+            padding: 12px 20px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .servers-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+
+        .server-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            position: relative;
+        }
+
+        .server-status {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .status-online {
+            background: #27ae60;
+        }
+
+        .status-offline {
+            background: #e74c3c;
+        }
+
+        .status-auth-failed {
+            background: #f39c12;
+        }
+
+        .server-name {
+            font-size: 18px;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+
+        .server-info {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+
+        .server-info div {
+            margin-bottom: 5px;
+        }
+
+        .server-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #ecf0f1;
+        }
+
+        .server-actions .btn {
+            flex: 1;
+            text-align: center;
+            padding: 8px;
+            font-size: 13px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            background: white;
+            border-radius: 8px;
+        }
+
+        .empty-state h2 {
+            color: #666;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎛️ 审计系统中控台</h1>
+    </div>
+
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="actions">
+            <a href="{{ url_for('add_server') }}" class="btn btn-primary">➕ 添加服务器</a>
+            <a href="{{ url_for('all_alerts') }}" class="btn btn-success">⚠️ 查看告警</a>
+        </div>
+
+        {% if servers %}
+        <div class="servers-grid">
+            {% for server in servers %}
+            <div class="server-card">
+                <div class="server-status status-{{ server.status }}"></div>
+
+                <div class="server-name">{{ server.name }}</div>
+
+                <div class="server-info">
+                    <div>🌐 <strong>地址：</strong>{{ server.host }}:{{ server.port }}</div>
+                    <div>👤 <strong>用户：</strong>{{ server.username }}</div>
+                    <div>📝 <strong>描述：</strong>{{ server.description or '无' }}</div>
+                    <div>⏰ <strong>添加时间：</strong>{{ server.added_at[:19] }}</div>
+                    <div>🔄 <strong>最后检查：</strong>{{ server.last_check[:19] }}</div>
+                    <div>🔑 <strong>Token 过期：</strong>{{ server.token_expires_at[:19] }}</div>
+                </div>
+
+                <div class="server-actions">
+                    <a href="{{ url_for('server_dashboard', server_id=server.id) }}" class="btn btn-primary">
+                        📊 仪表盘
+                    </a>
+                    <a href="{{ url_for('server_logs', server_id=server.id) }}" class="btn btn-primary">
+                        📋 日志
+                    </a>
+                    <form method="POST" action="{{ url_for('refresh_token', server_id=server.id) }}" style="flex: 1;">
+                        <button type="submit" class="btn btn-success" style="width: 100%;">
+                            🔄 刷新
+                        </button>
+                    </form>
+                    <form method="POST" action="{{ url_for('remove_server', server_id=server.id) }}"
+                          onsubmit="return confirm('确定删除此服务器？')" style="flex: 1;">
+                        <button type="submit" class="btn btn-danger" style="width: 100%;">
+                            🗑️ 删除
+                        </button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <h2>暂无服务器</h2>
+            <p>点击"添加服务器"开始监控</p>
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>

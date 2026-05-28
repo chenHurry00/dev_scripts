@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日志查询 - 服务器审计系统</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+        }
+
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .header h1 {
+            font-size: 20px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .user-info {
+            color: #ecf0f1;
+        }
+
+        .btn-logout {
+            background: #e74c3c;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 14px;
+        }
+
+        .nav-menu {
+            background: white;
+            padding: 10px 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .nav-menu a {
+            color: #2c3e50;
+            text-decoration: none;
+            padding: 10px 15px;
+            display: inline-block;
+            border-bottom: 2px solid transparent;
+        }
+
+        .nav-menu a:hover,
+        .nav-menu a.active {
+            border-bottom-color: #3498db;
+            color: #3498db;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+
+        .filter-section {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .filter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .filter-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #666;
+            font-size: 14px;
+        }
+
+        .filter-group input,
+        .filter-group select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .btn-filter {
+            background: #3498db;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .btn-filter:hover {
+            background: #2980b9;
+        }
+
+        .section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .section-header {
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #ecf0f1;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .log-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .log-table th {
+            background: #ecf0f1;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 14px;
+        }
+
+        .log-table td {
+            padding: 12px;
+            border-bottom: 1px solid #ecf0f1;
+            font-size: 14px;
+        }
+
+        .log-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .risk-badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .risk-critical {
+            background: #fee;
+            color: #e74c3c;
+        }
+
+        .risk-high {
+            background: #fef5e7;
+            color: #e67e22;
+        }
+
+        .risk-medium {
+            background: #fef9e7;
+            color: #f39c12;
+        }
+
+        .risk-low {
+            background: #ebf5fb;
+            color: #3498db;
+        }
+
+        .risk-info {
+            background: #f4f6f7;
+            color: #95a5a6;
+        }
+
+        .pagination {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .pagination a {
+            display: inline-block;
+            padding: 8px 12px;
+            margin: 0 5px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            color: #2c3e50;
+            text-decoration: none;
+        }
+
+        .pagination a:hover {
+            background: #3498db;
+            color: white;
+            border-color: #3498db;
+        }
+
+        .pagination .current {
+            background: #3498db;
+            color: white;
+            border-color: #3498db;
+        }
+
+        .stats-info {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎛️ 服务器审计系统</h1>
+        <div class="header-right">
+            <span class="user-info">👤 {{ session.username }}</span>
+            <a href="{{ url_for('logout') }}" class="btn-logout">退出</a>
+        </div>
+    </div>
+
+    <div class="nav-menu">
+        <a href="{{ url_for('dashboard') }}">仪表盘</a>
+        <a href="{{ url_for('logs') }}" class="active">日志查询</a>
+    </div>
+
+    <div class="container">
+        <div class="filter-section">
+            <form method="GET" action="{{ url_for('logs') }}">
+                <div class="filter-grid">
+                    <div class="filter-group">
+                        <label>用户名</label>
+                        <input type="text" name="username" value="{{ request.args.get('username', '') }}" placeholder="输入用户名">
+                    </div>
+
+                    <div class="filter-group">
+                        <label>最小风险级别</label>
+                        <select name="risk_min">
+                            <option value="">全部</option>
+                            <option value="1" {% if request.args.get('risk_min') == '1' %}selected{% endif %}>L1 - INFO</option>
+                            <option value="2" {% if request.args.get('risk_min') == '2' %}selected{% endif %}>L2 - LOW</option>
+                            <option value="3" {% if request.args.get('risk_min') == '3' %}selected{% endif %}>L3 - MEDIUM</option>
+                            <option value="4" {% if request.args.get('risk_min') == '4' %}selected{% endif %}>L4 - HIGH</option>
+                            <option value="5" {% if request.args.get('risk_min') == '5' %}selected{% endif %}>L5 - CRITICAL</option>
+                        </select>
+                    </div>
+
+                    <div class="filter-group">
+                        <label>操作分类</label>
+                        <select name="category">
+                            <option value="">全部</option>
+                            <option value="AUTH" {% if request.args.get('category') == 'AUTH' %}selected{% endif %}>认证</option>
+                            <option value="FILE" {% if request.args.get('category') == 'FILE' %}selected{% endif %}>文件</option>
+                            <option value="SYSTEM" {% if request.args.get('category') == 'SYSTEM' %}selected{% endif %}>系统</option>
+                            <option value="DATA" {% if request.args.get('category') == 'DATA' %}selected{% endif %}>数据</option>
+                            <option value="CONFIG" {% if request.args.get('category') == 'CONFIG' %}selected{% endif %}>配置</option>
+                            <option value="ACCESS" {% if request.args.get('category') == 'ACCESS' %}selected{% endif %}>访问</option>
+                        </select>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn-filter">🔍 查询</button>
+            </form>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">审计日志</h2>
+            </div>
+
+            <div class="stats-info">
+                共 {{ total }} 条记录，当前第 {{ page }} 页
+            </div>
+
+            <table class="log-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>时间</th>
+                        <th>用户</th>
+                        <th>IP地址</th>
+                        <th>操作分类</th>
+                        <th>操作类型</th>
+                        <th>目标资源</th>
+                        <th>风险级别</th>
+                        <th>结果</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in logs %}
+                    <tr>
+                        <td>{{ log.id }}</td>
+                        <td>{{ log.timestamp[:19] }}</td>
+                        <td>{{ log.username }}</td>
+                        <td>{{ log.ip_address }}</td>
+                        <td>{{ log.action_category }}</td>
+                        <td>{{ log.action_type }}</td>
+                        <td>{{ log.target_resource[:40] }}</td>
+                        <td>
+                            <span class="risk-badge risk-{{ log.risk_label.lower() }}">
+                                L{{ log.risk_level }} - {{ log.risk_label }}
+                            </span>
+                        </td>
+                        <td>{{ log.result }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <div class="pagination">
+                {% if page > 1 %}
+                    <a href="?page={{ page - 1 }}&username={{ request.args.get('username', '') }}&risk_min={{ request.args.get('risk_min', '') }}&category={{ request.args.get('category', '') }}">上一页</a>
+                {% endif %}
+
+                <span class="current">{{ page }}</span>
+
+                {% if logs|length == per_page %}
+                    <a href="?page={{ page + 1 }}&username={{ request.args.get('username', '') }}&risk_min={{ request.args.get('risk_min', '') }}&category={{ request.args.get('category', '') }}">下一页</a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</body>
+</html>
