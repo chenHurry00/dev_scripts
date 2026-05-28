@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "id": "server_1",
+    "name": "3090",
+    "host": "10.24.11.9",
+    "port": "5500",
+    "base_url": "http://10.24.11.9:5500",
+    "username": "admin",
+    "password": "BY116358",
+    "description": "",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRfaWQiOiJjb250cm9sX2NlbnRlciIsInVzZXJuYW1lIjoiYWRtaW4iLCJleHAiOjE3ODAwNjIzNTF9.MO8rpVug37tH2flO1FHKeA-jRL4wNFPRS8ZiefWmVgQ",
+    "token_expires_at": "2026-05-29T21:45:51.213185",
+    "status": "online",
+    "added_at": "2026-05-28T21:45:51.213221",
+    "last_check": "2026-05-28T21:54:29.612358"
+  }
+]

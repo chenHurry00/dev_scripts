@@ -73,6 +73,13 @@
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+            cursor: pointer;
         }
 
         .stat-label {
@@ -218,6 +225,7 @@
     <div class="nav-menu">
         <a href="{{ url_for('dashboard') }}" class="active">仪表盘</a>
         <a href="{{ url_for('logs') }}">日志查询</a>
+        <a href="{{ url_for('sessions') }}">在线会话</a>
     </div>
 
     <div class="container">
@@ -237,10 +245,12 @@
                 <div class="stat-value">{{ stats.high_count }}</div>
             </div>
 
-            <div class="stat-card">
-                <div class="stat-label">👥 在线用户</div>
-                <div class="stat-value">{{ stats.online_users }}</div>
-            </div>
+            <a href="{{ url_for('sessions') }}" style="text-decoration: none; color: inherit;">
+                <div class="stat-card">
+                    <div class="stat-label">👥 在线用户</div>
+                    <div class="stat-value">{{ stats.online_users }}</div>
+                </div>
+            </a>
 
             <div class="stat-card">
                 <div class="stat-label">⚠️ 未读告警</div>

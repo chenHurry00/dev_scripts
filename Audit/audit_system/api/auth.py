@@ -24,7 +24,7 @@ def generate_token():
     响应：
     {
         "token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-        "expires_in": 86400
+        "expires_in": 31536000
     }
     """
     data = request.get_json()
@@ -40,16 +40,16 @@ def generate_token():
     # 验证 admin 账户
     if username == current_app.config['ADMIN_USERNAME']:
         if check_password_hash(current_app.config['ADMIN_PASSWORD_HASH'], password):
-            # 生成 JWT Token
+            # 生成 JWT Token（有效期 1 年）
             token = jwt.encode({
                 'client_id': 'control_center',
                 'username': username,
-                'exp': datetime.utcnow() + timedelta(hours=24)
+                'exp': datetime.utcnow() + timedelta(days=365)
             }, current_app.config['API_SECRET_KEY'], algorithm='HS256')
 
             return jsonify({
                 'token': token,
-                'expires_in': 86400
+                'expires_in': 31536000  # 1 年（秒）
             })
 
     return jsonify({'error': 'Invalid credentials'}), 401

@@ -244,6 +244,7 @@
     <div class="nav-menu">
         <a href="{{ url_for('dashboard') }}">仪表盘</a>
         <a href="{{ url_for('logs') }}" class="active">日志查询</a>
+        <a href="{{ url_for('sessions') }}">在线会话</a>
     </div>
 
     <div class="container">
@@ -252,7 +253,14 @@
                 <div class="filter-grid">
                     <div class="filter-group">
                         <label>用户名</label>
-                        <input type="text" name="username" value="{{ request.args.get('username', '') }}" placeholder="输入用户名">
+                        <select name="username">
+                            <option value="">全部用户</option>
+                            {% for user in users %}
+                            <option value="{{ user.username }}" {% if request.args.get('username') == user.username %}selected{% endif %}>
+                                {{ user.username }}
+                            </option>
+                            {% endfor %}
+                        </select>
                     </div>
 
                     <div class="filter-group">

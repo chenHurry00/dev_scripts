@@ -99,9 +99,19 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 if command -v ufw &> /dev/null; then
     echo "检测到 ufw 防火墙"
-    ufw allow $PORT/tcp comment 'Audit System Web'
-    ufw --force enable
-    echo "✓ 已开放端口 $PORT"
+
+    # 检查防火墙是否启用
+    if ufw status | grep -q "Status: active"; then
+        # 只添加审计系统端口，不修改其他规则
+        ufw allow $PORT/tcp comment 'Audit System Web'
+        echo "✓ 已开放端口 $PORT"
+    else
+        echo "⚠️  防火墙未启用，跳过配置"
+        echo "   如需启用防火墙，请手动执行："
+        echo "   sudo ufw allow 22/tcp"
+        echo "   sudo ufw allow $PORT/tcp"
+        echo "   sudo ufw enable"
+    fi
 
 elif command -v firewall-cmd &> /dev/null; then
     echo "检测到 firewalld 防火墙"
@@ -110,7 +120,7 @@ elif command -v firewall-cmd &> /dev/null; then
     echo "✓ 已开放端口 $PORT"
 
 else
-    echo "⚠️  未检测到防火墙，跳过配置"
+    echo "⊘ 未检测到防火墙，跳过配置"
 fi
 
 echo ""

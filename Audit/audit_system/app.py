@@ -327,6 +327,12 @@ def logs():
     """日志列表"""
     db = get_db()
 
+    # 获取所有用户列表
+    users = db.execute("""
+        SELECT DISTINCT username FROM audit_logs
+        ORDER BY username
+    """).fetchall()
+
     # 分页参数
     page = request.args.get('page', 1, type=int)
     per_page = 50
@@ -361,9 +367,37 @@ def logs():
 
     return render_template('admin/logs.html',
                          logs=logs,
+                         users=users,
                          page=page,
                          per_page=per_page,
                          total=total)
+
+
+@app.route('/sessions')
+@login_required
+@admin_required
+def sessions():
+    """在线会话列表"""
+    db = get_db()
+
+    # 获取所有活跃会话
+    active_sessions = db.execute("""
+        SELECT * FROM login_sessions
+        WHERE is_active = 1
+        ORDER BY login_time DESC
+    """).fetchall()
+
+    # 获取最近登出的会话
+    recent_sessions = db.execute("""
+        SELECT * FROM login_sessions
+        WHERE is_active = 0
+        ORDER BY logout_time DESC
+        LIMIT 20
+    """).fetchall()
+
+    return render_template('admin/sessions.html',
+                         active_sessions=active_sessions,
+                         recent_sessions=recent_sessions)
 
 
 if __name__ == '__main__':

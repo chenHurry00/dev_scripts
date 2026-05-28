@@ -18,60 +18,40 @@
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
+### 重要提示 ⚠️
+
+**防火墙安全：**
+- 安装脚本**只管理审计系统端口**，不会修改其他防火墙规则
+- 如果防火墙未启用，脚本会跳过配置并提示手动操作
+- **绝不会自动启用防火墙**，避免锁死 SSH 连接
+
+### 方式 1：交互式管理（推荐）
 
 ```bash
 cd audit_system
-pip install -r requirements.txt
+sudo ./manage.sh
 ```
 
-### 2. 安装命令审计（可选）
+交互式菜单包含：
+- 安装/卸载 Web 服务
+- 安装/卸载命令审计
+- 清理重复进程
+- 完全卸载
 
-如果需要记录 Linux 终端命令：
-
-```bash
-# 安装 Bash 钩子
-./install_command_audit.sh
-
-# 重新加载配置
-source ~/.bashrc
-
-# 启动后台同步服务
-nohup python3 sync_buffer.py > /tmp/audit-sync.log 2>&1 &
-```
-
-### 3. 启动方式
-
-#### 方式 1：开发环境（手动启动）
+### 方式 2：命令行安装
 
 ```bash
-# 使用默认端口 5000
-python3 app.py
-
-# 指定端口
-AUDIT_PORT=8080 python3 app.py
-
-# 自定义密码
-AUDIT_ADMIN_PASSWORD=YourPassword123 python3 app.py
-```
-
-#### 方式 2：生产环境（systemd 服务）
-
-```bash
-# 安装服务（默认端口 5000）
+# 安装 Web 服务（默认端口 5000）
 sudo ./install_service.sh
-
-# 指定端口
-sudo ./install_service.sh -p 8080
 
 # 指定端口和密码
 sudo ./install_service.sh -p 8080 --password YourPassword123
 
-# 卸载服务
-sudo ./uninstall_service.sh
+# 安装命令审计
+sudo ./install_command_audit.sh
 ```
 
-### 4. 访问系统
+### 访问系统
 
 - **管理界面**：http://localhost:5000
 - **默认账户**：admin / BY116358
@@ -338,12 +318,50 @@ lsof -i :5000
 
 ### 问题：无法登录
 ```bash
-# 检查 admin 用户
-sqlite3 data/audit.db "SELECT * FROM users WHERE username='admin';"
-
 # 重置密码（重启应用）
 export AUDIT_ADMIN_PASSWORD=NewPassword123!
 python app.py
+```
+
+### 问题：命令重复记录
+```bash
+# 使用管理工具清理
+sudo ./manage.sh
+# 选择 7. 清理重复进程
+```
+
+## 🔧 维护与卸载
+
+### 统一管理工具（推荐）
+
+```bash
+sudo ./manage.sh
+```
+
+交互式菜单提供：
+1. 安装 Web 服务
+2. 卸载 Web 服务
+3. 重启 Web 服务
+4. 查看服务状态
+5. 安装命令审计
+6. 卸载命令审计
+7. 清理重复进程
+8. 完全卸载（服务+审计+数据）
+
+### 常用命令
+
+```bash
+# 查看服务状态
+sudo systemctl status audit-web
+sudo systemctl status audit-sync
+
+# 查看日志
+sudo journalctl -u audit-web -f
+sudo journalctl -u audit-sync -f
+
+# 重启服务
+sudo systemctl restart audit-web
+sudo systemctl restart audit-sync
 ```
 
 ### 问题：API 认证失败
