@@ -70,7 +70,6 @@ def sync_buffer_file(buffer_file):
 
     # 批量处理
     processed = 0
-    hostname = socket.gethostname()
 
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
@@ -83,6 +82,7 @@ def sync_buffer_file(buffer_file):
                 username = log.get('username', 'unknown')
                 timestamp = log.get('timestamp', datetime.now().isoformat())
                 session_id = log.get('session_id', '')
+                client_ip = log.get('client_ip', '127.0.0.1')  # 从日志中获取客户端 IP
 
                 # 分类
                 category, action_type, risk_level = classify_command(command)
@@ -92,6 +92,15 @@ def sync_buffer_file(buffer_file):
                     f"{timestamp}{username}{command}".encode()
                 ).hexdigest()
 
+                # 检查是否已存在（防止重复插入）
+                cursor.execute(
+                    "SELECT id FROM audit_logs WHERE checksum = ?",
+                    (checksum,)
+                )
+                if cursor.fetchone():
+                    processed += 1
+                    continue
+
                 # 插入数据库
                 cursor.execute("""
                     INSERT INTO audit_logs (
@@ -100,7 +109,7 @@ def sync_buffer_file(buffer_file):
                         result, risk_level, risk_label, checksum
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    timestamp, username, session_id, hostname,
+                    timestamp, username, session_id, client_ip,
                     category, action_type, command[:200], 'success',
                     risk_level, RISK_LABELS[risk_level], checksum
                 ))

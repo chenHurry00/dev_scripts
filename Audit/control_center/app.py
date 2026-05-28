@@ -331,11 +331,27 @@ def server_logs(server_id):
         flash('服务器不存在', 'error')
         return redirect(url_for('index'))
 
+    # 获取用户列表（用于下拉选择）
+    success_users, users_data = server_manager.api_request(
+        server_id, '/api/v1/logs', params={'per_page': 1000}
+    )
+
+    # 提取唯一用户名
+    users = []
+    if success_users:
+        seen = set()
+        for log in users_data.get('data', []):
+            username = log.get('username')
+            if username and username not in seen:
+                users.append({'username': username})
+                seen.add(username)
+        users.sort(key=lambda x: x['username'])
+
     # 获取查询参数
     params = {
         'page': request.args.get('page', 1, type=int),
         'per_page': 50,
-        'user': request.args.get('user'),
+        'user': request.args.get('username'),  # 改为 username 保持一致
         'risk_min': request.args.get('risk_min', type=int),
         'category': request.args.get('category')
     }
@@ -361,6 +377,7 @@ def server_logs(server_id):
     return render_template('control_center/logs.html',
                          server=server,
                          logs=logs,
+                         users=users,
                          total=total,
                          page=page,
                          per_page=50)

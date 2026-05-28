@@ -25,12 +25,22 @@ def main():
     if not command or 'audit_command' in command or 'view_audit_logs' in command:
         return
 
+    # 获取客户端 IP（SSH 连接者的 IP）
+    client_ip = os.environ.get('SSH_CLIENT', '').split()[0] if os.environ.get('SSH_CLIENT') else None
+    if not client_ip:
+        # 备用：SSH_CONNECTION
+        client_ip = os.environ.get('SSH_CONNECTION', '').split()[0] if os.environ.get('SSH_CONNECTION') else None
+    if not client_ip:
+        # 本地登录或无法获取，使用 localhost
+        client_ip = '127.0.0.1'
+
     # 构建日志条目
     log_entry = {
         'timestamp': datetime.now().isoformat(),
         'username': os.environ.get('USER', 'unknown'),
         'command': command,
-        'session_id': os.environ.get('AUDIT_SESSION_ID', '')
+        'session_id': os.environ.get('AUDIT_SESSION_ID', ''),
+        'client_ip': client_ip
     }
 
     # 快速写入文件（追加模式，无锁）

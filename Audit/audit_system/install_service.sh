@@ -201,9 +201,38 @@ echo "✓ 已设置开机自启"
 echo ""
 
 # ============================================================
-# 6. 检查服务状态
+# 6. 配置数据库
 # ============================================================
-echo "【6】检查服务状态"
+echo "【6】配置数据库"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# 等待数据库初始化
+sleep 2
+
+# 添加防重复索引
+DB_PATH="$AUDIT_DIR/data/audit.db"
+if [ -f "$DB_PATH" ]; then
+    INDEX_EXISTS=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_audit_checksum_unique';" 2>/dev/null)
+    if [ -z "$INDEX_EXISTS" ]; then
+        echo "正在添加防重复索引..."
+        if sqlite3 "$DB_PATH" "CREATE UNIQUE INDEX idx_audit_checksum_unique ON audit_logs(checksum);" 2>/dev/null; then
+            echo "✓ 已添加防重复索引"
+        else
+            echo "⚠️  添加索引失败（可能已存在）"
+        fi
+    else
+        echo "✓ 防重复索引已存在"
+    fi
+else
+    echo "⚠️  数据库尚未创建，首次访问时会自动初始化"
+fi
+
+echo ""
+
+# ============================================================
+# 7. 检查服务状态
+# ============================================================
+echo "【7】检查服务状态"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 sleep 2

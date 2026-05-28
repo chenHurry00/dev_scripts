@@ -20,11 +20,12 @@ show_menu() {
     echo ""
     echo "【维护工具】"
     echo "  7. 清理重复进程"
-    echo "  8. 完全卸载（服务+审计+数据）"
+    echo "  8. 清空数据库（保留服务）"
+    echo "  9. 完全卸载（服务+审计+数据）"
     echo ""
     echo "  0. 退出"
     echo ""
-    read -p "请选择 [0-8]: " choice
+    read -p "请选择 [0-9]: " choice
     echo ""
 }
 
@@ -110,6 +111,63 @@ EOF
     systemctl start audit-web audit-sync
     systemctl enable audit-web audit-sync
 
+    echo ""
+    echo "【配置数据库】"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # 等待数据库初始化（最多等待 10 秒）
+    DB_PATH="$SCRIPT_DIR/data/audit.db"
+    for i in {1..10}; do
+        if [ -f "$DB_PATH" ]; then
+            echo "✓ 数据库已初始化"
+            break
+        fi
+        echo "等待数据库初始化... ($i/10)"
+        sleep 1
+    done
+
+    if [ ! -f "$DB_PATH" ]; then
+        echo "⚠️  数据库未创建，请访问 Web 界面触发初始化"
+        echo ""
+        echo "✓ 安装完成"
+        echo ""
+        echo "访问地址: http://localhost:$port"
+        echo "用户名: admin"
+        echo "密码: $password"
+        return 0
+    fi
+
+    # 添加防重复索引
+    INDEX_EXISTS=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_audit_checksum_unique';" 2>/dev/null)
+    if [ -z "$INDEX_EXISTS" ]; then
+        echo "正在添加防重复索引..."
+
+        # 尝试创建索引
+        ERROR_MSG=$(sqlite3 "$DB_PATH" "CREATE UNIQUE INDEX idx_audit_checksum_unique ON audit_logs(checksum);" 2>&1)
+
+        if [ $? -eq 0 ]; then
+            echo "✓ 已添加防重复索引"
+        else
+            echo "✗ 添加索引失败"
+            echo "  错误信息: $ERROR_MSG"
+
+            # 检查是否因为重复数据导致失败
+            if echo "$ERROR_MSG" | grep -q "UNIQUE"; then
+                echo ""
+                echo "⚠️  数据库中存在重复记录，需要先清理"
+                echo "  执行以下命令清理重复记录："
+                echo ""
+                echo "  sudo systemctl stop audit-sync"
+                echo "  sqlite3 $DB_PATH \"DELETE FROM audit_logs WHERE id NOT IN (SELECT MIN(id) FROM audit_logs GROUP BY checksum);\""
+                echo "  sqlite3 $DB_PATH \"CREATE UNIQUE INDEX idx_audit_checksum_unique ON audit_logs(checksum);\""
+                echo "  sudo systemctl start audit-sync"
+            fi
+        fi
+    else
+        echo "✓ 防重复索引已存在"
+    fi
+
+    echo ""
     echo "✓ 安装完成"
     echo ""
     echo "访问地址: http://localhost:$port"
@@ -276,12 +334,19 @@ cleanup() {
     fi
 }
 
-full_uninstall() {
-    echo "【完全卸载】"
+clear_data() {
+    echo "【清空数据库】"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "⚠️  警告: 将删除所有服务、钩子和数据"
+    echo "⚠️  警告: 将删除以下内容："
+    echo "  - 数据库文件（$SCRIPT_DIR/data/audit.db）"
+    echo "  - 日志文件（$SCRIPT_DIR/logs/*.log）"
+    echo "  - 用户缓冲文件（~/.audit_buffer.jsonl）"
     echo ""
-    read -p "确认完全卸载？[y/N] " -n 1 -r
+    echo "✓ 保留以下内容："
+    echo "  - systemd 服务配置"
+    echo "  - 命令审计钩子"
+    echo ""
+    read -p "确认清空数据？[y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         return 0
@@ -293,31 +358,101 @@ full_uninstall() {
     fi
 
     # 停止服务
+    echo "正在停止服务..."
+    systemctl stop audit-web audit-sync 2>/dev/null
+    echo "✓ 已停止服务"
+
+    # 删除数据
+    rm -rf "$SCRIPT_DIR/data"
+    rm -rf "$SCRIPT_DIR/logs"
+    echo "✓ 已删除数据库和日志"
+
+    # 清理缓冲
+    find /home /root -maxdepth 2 -name ".audit_buffer.jsonl" -delete 2>/dev/null
+    echo "✓ 已清理缓冲文件"
+
+    # 重启服务
+    echo ""
+    read -p "是否重启服务？[Y/n] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        systemctl start audit-web audit-sync
+        echo "✓ 已重启服务"
+        echo "  数据库将在首次访问时自动初始化"
+    fi
+
+    echo ""
+    echo "✓ 清空完成"
+}
+
+full_uninstall() {
+    echo "【完全卸载】"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "⚠️  警告: 将删除以下内容："
+    echo "  - systemd 服务（audit-web, audit-sync）"
+    echo "  - 命令审计钩子（/etc/profile.d/audit.sh）"
+    echo "  - 用户缓冲文件（~/.audit_buffer.jsonl）"
+    echo "  - 数据库和日志（$SCRIPT_DIR/data, $SCRIPT_DIR/logs）"
+    echo ""
+    read -p "确认完全卸载（包括数据）？[y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        return 0
+    fi
+
+    if [ "$EUID" -ne 0 ]; then
+        echo "✗ 需要 root 权限"
+        return 1
+    fi
+
+    # 停止服务
+    echo "正在停止服务..."
     systemctl stop audit-web audit-sync 2>/dev/null
     systemctl disable audit-web audit-sync 2>/dev/null
     rm -f /etc/systemd/system/audit-web.service
     rm -f /etc/systemd/system/audit-sync.service
     systemctl daemon-reload
+    echo "✓ 已删除服务"
 
     # 停止进程
     pkill -f sync_buffer.py
 
     # 删除钩子
     rm -f /etc/profile.d/audit.sh
+    echo "✓ 已删除命令审计钩子"
 
     # 清理缓冲
     find /home /root -maxdepth 2 -name ".audit_buffer.jsonl" -delete 2>/dev/null
+    echo "✓ 已清理缓冲文件"
 
     # 删除数据
-    read -p "是否删除数据库和日志？[y/N] " -n 1 -r
+    rm -rf "$SCRIPT_DIR/data"
+    rm -rf "$SCRIPT_DIR/logs"
+    echo "✓ 已删除数据库和日志"
+
+    # 删除防火墙规则
+    echo ""
+    read -p "是否删除防火墙规则？[y/N] " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        rm -rf "$SCRIPT_DIR/data"
-        rm -rf "$SCRIPT_DIR/logs"
-        echo "✓ 已删除数据"
+        if command -v ufw &> /dev/null; then
+            ufw status numbered | grep "Audit System" | while read line; do
+                rule_num=$(echo "$line" | grep -oP '^\[\s*\K\d+')
+                if [ -n "$rule_num" ]; then
+                    ufw --force delete $rule_num
+                fi
+            done
+            echo "✓ 已删除防火墙规则"
+        elif command -v firewall-cmd &> /dev/null; then
+            echo "⚠️  请手动删除端口规则："
+            echo "   firewall-cmd --permanent --remove-port=<端口>/tcp"
+            echo "   firewall-cmd --reload"
+        fi
     fi
 
+    echo ""
     echo "✓ 完全卸载完成"
+    echo "⚠️  用户需要重新登录或执行: unset PROMPT_COMMAND"
 }
 
 # 主循环
@@ -332,7 +467,8 @@ while true; do
         5) install_command_audit ;;
         6) uninstall_command_audit ;;
         7) cleanup ;;
-        8) full_uninstall ;;
+        8) clear_data ;;
+        9) full_uninstall ;;
         0) echo "退出"; exit 0 ;;
         *) echo "无效选择" ;;
     esac
