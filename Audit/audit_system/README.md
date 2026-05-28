@@ -50,7 +50,7 @@ audit_system/
 ├── app.py                          # Flask 主应用
 ├── config.py                       # 配置文件
 ├── start.sh                        # 启动脚本
-├── README.md                       # 主文档
+├── requirements.txt                # 依赖列表
 │
 ├── audit_command_buffer.py         # 命令审计（高性能缓冲版）
 ├── audit_bash_hook.sh              # Bash 钩子
@@ -58,69 +58,18 @@ audit_system/
 ├── install_command_audit.sh        # 安装脚本
 │
 ├── models/                         # 数据库模型
-├── audit/                          # 审计模块
-├── api/                            # API 层
+├── audit/                          # 审计模块（logger, classifier, decorator）
+├── api/                            # REST API（auth, routes）
 ├── admin/                          # 管理模块
-├── static/                         # 静态文件
-├── templates/                      # HTML 模板
+├── static/                         # 静态文件（CSS, JS）
+├── templates/                      # HTML 模板（login, dashboard, logs）
 │
 ├── tests/                          # 测试文件
-│   ├── test_system.py              # 系统测试
-│   ├── test_command_audit.sh       # 命令审计测试
-│   ├── check_stability.py          # 稳定性检查
-│   └── check_summary.sh            # 检查总结
-│
 ├── tools/                          # 工具脚本
-│   ├── optimize.sh                 # 性能优化脚本
-│   └── view_audit_logs.py          # 日志查看工具
-│
 ├── docs/                           # 文档
-│   ├── COMMAND_AUDIT.md            # 命令审计文档
-│   ├── STABILITY_REPORT.md         # 稳定性报告
-│   └── USAGE.sh                    # 使用指南
-│
-├── deprecated/                     # 弃用文件（仅供参考）
-│   ├── audit_command.py            # 原版（性能差）
-│   ├── audit_command_fast.py       # 快速版
-│   └── import_command_logs.py      # 手动导入工具
 │
 ├── data/                           # 数据库
-└── logs/                           # 日志
-```
-├── config.py                 # 配置管理
-├── requirements.txt          # 依赖列表
-├── test_system.py           # 功能测试脚本
-│
-├── audit/                    # 审计模块
-│   ├── __init__.py
-│   ├── logger.py            # 审计日志记录器
-│   ├── classifier.py        # 操作分类器
-│   └── decorator.py         # 审计装饰器
-│
-├── api/                      # REST API
-│   ├── __init__.py
-│   ├── auth.py              # API 认证（JWT）
-│   └── routes.py            # API 路由
-│
-├── models/                   # 数据模型
-│   ├── __init__.py
-│   └── database.py          # 数据库辅助函数
-│
-├── templates/                # 前端模板
-│   ├── auth/
-│   │   └── login.html       # 登录页面
-│   └── admin/
-│       ├── dashboard.html   # 仪表盘
-│       └── logs.html        # 日志查询
-│
-├── data/                     # 数据目录
-│   └── audit.db             # SQLite 数据库
-│
-└── logs/                     # 日志目录
-    ├── audit/               # 审计日志文件
-    ├── access/              # 访问日志
-    ├── error/               # 错误日志
-    └── alert/               # 告警日志
+└── logs/                           # 日志（audit, access, error, alert）
 ```
 
 ## 🔐 Admin 密码管理
