@@ -367,4 +367,9 @@ def logs():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5500, debug=True)
+    # 从环境变量读取端口，默认 5000
+    port = int(os.environ.get('AUDIT_PORT', 5000))
+    debug = os.environ.get('FLASK_ENV', 'development') == 'development'
+
+    logger.info(f'启动 Web 服务，监听端口: {port}')
+    app.run(host='0.0.0.0', port=port, debug=debug)

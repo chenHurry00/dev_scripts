@@ -1,10 +1,8 @@
 #!/bin/bash
 # 审计系统 - 命令审计安装脚本
 
-set -e
-
-# 自动检测审计系统目录
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 获取脚本所在目录的绝对路径
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AUDIT_DIR="$SCRIPT_DIR"
 AUDIT_HOOK="$AUDIT_DIR/audit_bash_hook.sh"
 
@@ -18,6 +16,9 @@ echo ""
 # 检查文件是否存在
 if [ ! -f "$AUDIT_HOOK" ]; then
     echo "✗ 错误: 找不到 $AUDIT_HOOK"
+    echo "当前目录: $(pwd)"
+    echo "脚本目录: $SCRIPT_DIR"
+    ls -la "$SCRIPT_DIR/" | head -10
     exit 1
 fi
 

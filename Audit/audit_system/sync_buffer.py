@@ -8,11 +8,11 @@ import time
 import socket
 import hashlib
 import sqlite3
+import glob
 from pathlib import Path
 from datetime import datetime
 
 # 配置
-BUFFER_FILE = Path.home() / '.audit_buffer.jsonl'
 DB_PATH = Path(__file__).parent / 'data' / 'audit.db'
 SYNC_INTERVAL = 10  # 每 10 秒同步一次
 BATCH_SIZE = 100    # 每次最多处理 100 条
@@ -32,6 +32,17 @@ COMMAND_RULES = [
 ]
 
 
+def find_all_buffer_files():
+    """查找所有用户的缓冲文件"""
+    buffer_files = []
+
+    # 扫描 /home/*/
+    for pattern in ['/home/*/.audit_buffer.jsonl', '/root/.audit_buffer.jsonl']:
+        buffer_files.extend(glob.glob(pattern))
+
+    return [Path(f) for f in buffer_files if os.path.exists(f)]
+
+
 def classify_command(command):
     """命令分类和风险评估"""
     cmd_lower = command.lower()
@@ -42,14 +53,14 @@ def classify_command(command):
     return 'SYSTEM', 'COMMAND_EXEC', 2
 
 
-def sync_buffer_to_db():
-    """同步缓冲文件到数据库"""
-    if not BUFFER_FILE.exists() or not DB_PATH.exists():
+def sync_buffer_file(buffer_file):
+    """同步单个缓冲文件到数据库"""
+    if not buffer_file.exists() or not DB_PATH.exists():
         return 0
 
     # 读取缓冲文件
     try:
-        with open(BUFFER_FILE, 'r', encoding='utf-8') as f:
+        with open(buffer_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
     except:
         return 0
@@ -104,7 +115,7 @@ def sync_buffer_to_db():
         # 删除已处理的行
         if processed > 0:
             remaining_lines = lines[processed:]
-            with open(BUFFER_FILE, 'w', encoding='utf-8') as f:
+            with open(buffer_file, 'w', encoding='utf-8') as f:
                 f.writelines(remaining_lines)
 
     except Exception as e:
@@ -113,21 +124,35 @@ def sync_buffer_to_db():
     return processed
 
 
+def sync_all_buffers():
+    """同步所有用户的缓冲文件"""
+    buffer_files = find_all_buffer_files()
+    total_processed = 0
+
+    for buffer_file in buffer_files:
+        processed = sync_buffer_file(buffer_file)
+        if processed > 0:
+            username = buffer_file.parent.name
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username}: 同步 {processed} 条记录")
+            total_processed += processed
+
+    return total_processed
+
+
 def main():
     """主循环"""
     print("=" * 60)
     print("审计缓冲同步服务启动")
-    print(f"缓冲文件: {BUFFER_FILE}")
     print(f"数据库: {DB_PATH}")
     print(f"同步间隔: {SYNC_INTERVAL} 秒")
+    print(f"扫描路径: /home/*/.audit_buffer.jsonl, /root/.audit_buffer.jsonl")
     print("=" * 60)
     print()
 
     try:
         while True:
-            processed = sync_buffer_to_db()
-            if processed > 0:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] 同步 {processed} 条记录")
+            total_processed = sync_all_buffers()
+            # 只在有数据时输出（避免刷屏）
 
             time.sleep(SYNC_INTERVAL)
     except KeyboardInterrupt:

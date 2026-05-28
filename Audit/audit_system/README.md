@@ -40,17 +40,35 @@ source ~/.bashrc
 nohup python3 sync_buffer.py > /tmp/audit-sync.log 2>&1 &
 ```
 
-### 3. 启动 Web 应用
+### 3. 启动方式
+
+#### 方式 1：开发环境（手动启动）
 
 ```bash
-# 开发环境（使用默认密码）
-python app.py
+# 使用默认端口 5000
+python3 app.py
 
-# 生产环境（设置自定义密码）
-export AUDIT_ADMIN_USER=admin
-export AUDIT_ADMIN_PASSWORD=YourSecurePassword123!
-export API_SECRET_KEY=your-api-secret-key
-python app.py
+# 指定端口
+AUDIT_PORT=8080 python3 app.py
+
+# 自定义密码
+AUDIT_ADMIN_PASSWORD=YourPassword123 python3 app.py
+```
+
+#### 方式 2：生产环境（systemd 服务）
+
+```bash
+# 安装服务（默认端口 5000）
+sudo ./install_service.sh
+
+# 指定端口
+sudo ./install_service.sh -p 8080
+
+# 指定端口和密码
+sudo ./install_service.sh -p 8080 --password YourPassword123
+
+# 卸载服务
+sudo ./uninstall_service.sh
 ```
 
 ### 4. 访问系统
