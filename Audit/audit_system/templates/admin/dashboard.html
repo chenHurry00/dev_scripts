@@ -125,6 +125,32 @@
             color: #2c3e50;
         }
 
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 15px;
+            margin-bottom: 10px;
+        }
+
+        .status-item {
+            border: 1px solid #ecf0f1;
+            border-radius: 6px;
+            padding: 14px;
+        }
+
+        .status-label {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .status-value {
+            color: #2c3e50;
+            font-size: 20px;
+            font-weight: 700;
+            word-break: break-word;
+        }
+
         .btn-view-all {
             color: #3498db;
             text-decoration: none;
@@ -260,6 +286,47 @@
             <div class="stat-card">
                 <div class="stat-label">📊 总操作数</div>
                 <div class="stat-value">{{ stats.total_logs }}</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">服务端维护状态</h2>
+            </div>
+
+            <div class="status-grid">
+                <div class="status-item">
+                    <div class="status-label">自动维护</div>
+                    <div class="status-value">{{ '已开启' if maintenance.auto_maintenance_enabled else '已关闭' }}</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">数据库大小</div>
+                    <div class="status-value">{{ (maintenance.storage.data_db_bytes / 1024 / 1024)|round(1) }} MB</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">日志占用</div>
+                    <div class="status-value">{{ (maintenance.storage.logs_bytes / 1024 / 1024)|round(1) }} MB</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">备份占用</div>
+                    <div class="status-value">{{ (maintenance.storage.backup_bytes / 1024 / 1024)|round(1) }} MB</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">备份数量</div>
+                    <div class="status-value">{{ maintenance.backups.backup_count }}</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">磁盘剩余</div>
+                    <div class="status-value">{{ (maintenance.storage.disk_free_bytes / 1024 / 1024 / 1024)|round(1) }} GB</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">最近备份</div>
+                    <div class="status-value">{{ maintenance.last_backup.created_at if maintenance.last_backup else '-' }}</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">最近清理</div>
+                    <div class="status-value">{{ maintenance.last_cleanup.started_at if maintenance.last_cleanup else '-' }}</div>
+                </div>
             </div>
         </div>
 

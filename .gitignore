@@ -1,2 +1,6 @@
 /Audit/control_center/data/
 /Audit/control_center/config/
+/Audit/audit_system/tests/check_stability.py
+/Audit/audit_system/tests/check_summary.sh
+/Audit/audit_system/tests/test_command_audit.sh
+/Audit/audit_system/tests/test_system.py
