@@ -2,8 +2,15 @@
 # 审计系统 - Bash 集成脚本
 # 将此脚本添加到 ~/.bashrc 或 /etc/profile.d/audit.sh
 
-# 审计脚本路径（使用缓冲版，性能提升 95%）
-AUDIT_SCRIPT="/home/yuchen/scripts/Audit/audit_system/audit_command_buffer.py"
+# 审计脚本路径（自动检测）
+# 优先级：环境变量 > 相对路径 > 默认路径
+if [ -n "$AUDIT_SCRIPT_PATH" ]; then
+    AUDIT_SCRIPT="$AUDIT_SCRIPT_PATH"
+else
+    # 获取当前脚本所在目录
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    AUDIT_SCRIPT="$SCRIPT_DIR/audit_command_buffer.py"
+fi
 
 # 检查脚本是否存在
 if [ -f "$AUDIT_SCRIPT" ]; then

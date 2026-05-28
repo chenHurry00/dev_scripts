@@ -25,7 +25,22 @@ cd audit_system
 pip install -r requirements.txt
 ```
 
-### 2. 启动应用
+### 2. 安装命令审计（可选）
+
+如果需要记录 Linux 终端命令：
+
+```bash
+# 安装 Bash 钩子
+./install_command_audit.sh
+
+# 重新加载配置
+source ~/.bashrc
+
+# 启动后台同步服务
+nohup python3 sync_buffer.py > /tmp/audit-sync.log 2>&1 &
+```
+
+### 3. 启动 Web 应用
 
 ```bash
 # 开发环境（使用默认密码）
@@ -38,10 +53,10 @@ export API_SECRET_KEY=your-api-secret-key
 python app.py
 ```
 
-### 3. 访问系统
+### 4. 访问系统
 
 - **管理界面**：http://localhost:5000
-- **默认账户**：admin / Admin@2026!Change
+- **默认账户**：admin / BY116358
 
 ## 📁 项目结构
 

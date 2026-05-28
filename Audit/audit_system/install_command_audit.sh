@@ -3,12 +3,17 @@
 
 set -e
 
-AUDIT_DIR="/home/yuchen/scripts/Audit/audit_system"
+# 自动检测审计系统目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUDIT_DIR="$SCRIPT_DIR"
 AUDIT_HOOK="$AUDIT_DIR/audit_bash_hook.sh"
 
 echo "============================================================"
 echo "审计系统 - 命令审计安装"
 echo "============================================================"
+echo ""
+echo "检测到审计系统路径: $AUDIT_DIR"
+echo ""
 
 # 检查文件是否存在
 if [ ! -f "$AUDIT_HOOK" ]; then
@@ -16,7 +21,6 @@ if [ ! -f "$AUDIT_HOOK" ]; then
     exit 1
 fi
 
-echo ""
 echo "📋 安装选项："
 echo "  1. 仅为当前用户安装 (推荐)"
 echo "  2. 为所有用户安装 (需要 root 权限)"
@@ -46,7 +50,7 @@ case $choice in
         echo ""
         echo "📌 测试审计功能："
         echo "  ls -la"
-        echo "  python3 $AUDIT_DIR/view_audit_logs.py"
+        echo "  等待 10 秒后查看 Web 界面"
         ;;
 
     2)
@@ -62,27 +66,27 @@ case $choice in
         # 创建全局配置文件
         GLOBAL_HOOK="/etc/profile.d/audit.sh"
 
-        if [ -f "$GLOBAL_HOOK" ]; then
-            echo "✓ 全局审计钩子已存在: $GLOBAL_HOOK"
-        else
-            cp "$AUDIT_HOOK" "$GLOBAL_HOOK"
-            chmod 644 "$GLOBAL_HOOK"
-            echo "✓ 已创建全局审计钩子: $GLOBAL_HOOK"
-        fi
+        cat > "$GLOBAL_HOOK" << EOF
+#!/bin/bash
+# 审计系统 - 全局命令审计钩子
+# 自动生成，请勿手动编辑
 
-        # 创建系统日志目录
-        mkdir -p /var/log
-        touch /var/log/audit_commands.log
-        chmod 666 /var/log/audit_commands.log
-        echo "✓ 已创建系统日志文件: /var/log/audit_commands.log"
+# 设置审计脚本路径
+export AUDIT_SCRIPT_PATH="$AUDIT_DIR/audit_command_buffer.py"
+
+# 加载审计钩子
+if [ -f "$AUDIT_HOOK" ]; then
+    source "$AUDIT_HOOK"
+fi
+EOF
+
+        chmod 644 "$GLOBAL_HOOK"
+        echo "✓ 已创建全局审计钩子: $GLOBAL_HOOK"
 
         echo ""
         echo "✅ 安装完成！"
         echo ""
         echo "📌 所有用户重新登录后生效"
-        echo ""
-        echo "📌 查看日志："
-        echo "  python3 $AUDIT_DIR/view_audit_logs.py"
         ;;
 
     *)
@@ -96,16 +100,14 @@ echo "============================================================"
 echo "📚 使用说明"
 echo "============================================================"
 echo ""
-echo "1. 查看审计日志："
-echo "   python3 $AUDIT_DIR/view_audit_logs.py"
+echo "1. 查看审计日志（Web 界面）："
+echo "   http://服务器IP:5000"
 echo ""
-echo "2. 查看指定用户的日志："
-echo "   python3 $AUDIT_DIR/view_audit_logs.py --user yuchen"
+echo "2. 查看审计日志（命令行）："
+echo "   python3 $AUDIT_DIR/tools/view_audit_logs.py"
 echo ""
-echo "3. 查看更多记录："
-echo "   python3 $AUDIT_DIR/view_audit_logs.py --limit 100"
-echo ""
-echo "4. 卸载审计功能："
-echo "   编辑 ~/.bashrc，删除包含 'audit_bash_hook.sh' 的行"
+echo "3. 卸载审计功能："
+echo "   - 当前用户: 编辑 ~/.bashrc，删除包含 'audit_bash_hook.sh' 的行"
+echo "   - 所有用户: sudo rm /etc/profile.d/audit.sh"
 echo ""
 echo "============================================================"
