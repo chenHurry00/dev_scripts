@@ -18,6 +18,8 @@
 9. [安全策略](#9-安全策略)
 10. [部署与运维](#10-部署与运维)
 11. [关键代码结构](#11-关键代码结构)
+12. [Admin 密码管理方案](#12-admin-密码管理方案) ⭐ 新增
+13. [中控台系统设计](#13-中控台系统设计) ⭐ 新增
 
 ---
 
@@ -32,6 +34,8 @@
 - **不可篡改**：日志写入后只读，防止攻击者销毁证据
 - **溯源追责**：支持按用户、时间、操作类型多维检索，还原事件时间线
 - **管理可视**：Admin 管理界面实时展示告警、统计与审计报告
+- **密码管理**：⭐ 在 app.py 顶部统一配置 Admin 密码，每次启动自动刷新
+- **中控台监控**：⭐ 本地部署统一管理界面，同时监控多台服务器
 
 ### 1.2 系统边界
 
@@ -1014,6 +1018,789 @@ def init_db():
 
 ---
 
+## 12. Admin 密码管理方案
+
+### 12.1 设计目标
+
+- **集中配置**：在 `app.py` 顶部统一管理 Admin 密码
+- **自动刷新**：每次应用启动时自动更新数据库中的密码
+- **环境变量优先**：支持通过环境变量覆盖默认配置
+- **安全提示**：使用默认密码时发出警告
+
+### 12.2 实现方案
+
+#### 12.2.1 app.py 顶部配置
+
+```python
+# ============= app.py 顶部配置 =============
+import os
+import logging
+from pathlib import Path
+from flask import Flask
+from werkzeug.security import generate_password_hash
+
+# ── Admin 密码配置 ──────────────────────────────────────
+# 优先级：环境变量 > 配置文件 > 默认值
+ADMIN_USERNAME = os.environ.get('AUDIT_ADMIN_USER', 'admin')
+ADMIN_PASSWORD = os.environ.get('AUDIT_ADMIN_PASSWORD', 'Admin@2026!Change')
+
+# 安全提示
+if ADMIN_PASSWORD == 'Admin@2026!Change':
+    logging.warning('⚠️  使用默认 Admin 密码，生产环境请通过环境变量设置！')
+    logging.warning('   export AUDIT_ADMIN_PASSWORD=your_secure_password')
+
+# ── Flask 应用初始化 ────────────────────────────────────
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
+app.config['AUDIT_DB'] = 'data/audit.db'
+app.config['ADMIN_USERNAME'] = ADMIN_USERNAME
+app.config['ADMIN_PASSWORD_HASH'] = generate_password_hash(ADMIN_PASSWORD)
+```
+
+#### 12.2.2 密码自动刷新函数
+
+```python
+def init_or_refresh_admin():
+    """
+    应用启动时执行：
+    1. 如果 admin 用户不存在，创建
+    2. 如果已存在，更新密码为当前配置的密码
+    """
+    import sqlite3
+    
+    db_path = Path(app.config['AUDIT_DB'])
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # 创建用户表（如果不存在）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            username     TEXT    NOT NULL UNIQUE,
+            password_hash TEXT   NOT NULL,
+            role         TEXT    NOT NULL DEFAULT 'user',
+            email        TEXT,
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+            last_login   TEXT,
+            login_ip     TEXT,
+            is_active    INTEGER NOT NULL DEFAULT 1,
+            failed_login_count INTEGER DEFAULT 0,
+            locked_until TEXT
+        )
+    """)
+    
+    # 检查 admin 用户是否存在
+    cursor.execute("SELECT id FROM users WHERE username = ?", (ADMIN_USERNAME,))
+    admin_exists = cursor.fetchone()
+    
+    if admin_exists:
+        # 更新密码
+        cursor.execute("""
+            UPDATE users 
+            SET password_hash = ?, 
+                failed_login_count = 0,
+                locked_until = NULL,
+                is_active = 1
+            WHERE username = ?
+        """, (app.config['ADMIN_PASSWORD_HASH'], ADMIN_USERNAME))
+        logging.info(f'✓ Admin 用户 "{ADMIN_USERNAME}" 密码已刷新')
+    else:
+        # 创建 admin 用户
+        cursor.execute("""
+            INSERT INTO users (username, password_hash, role, email)
+            VALUES (?, ?, 'admin', 'admin@localhost')
+        """, (ADMIN_USERNAME, app.config['ADMIN_PASSWORD_HASH']))
+        logging.info(f'✓ Admin 用户 "{ADMIN_USERNAME}" 已创建')
+    
+    conn.commit()
+    conn.close()
+
+# 应用启动时执行
+with app.app_context():
+    init_or_refresh_admin()
+```
+
+### 12.3 使用方式
+
+#### 开发环境
+
+```bash
+# 使用默认密码（会有警告）
+python app.py
+
+# 通过环境变量设置
+export AUDIT_ADMIN_USER=admin
+export AUDIT_ADMIN_PASSWORD=MySecurePassword123!
+python app.py
+```
+
+#### 生产环境（systemd）
+
+```ini
+# /etc/systemd/system/audit-system.service
+[Unit]
+Description=Server Audit System
+After=network.target
+
+[Service]
+Type=simple
+User=audit
+WorkingDirectory=/opt/audit-system
+Environment="AUDIT_ADMIN_USER=admin"
+Environment="AUDIT_ADMIN_PASSWORD=ProductionPassword2026!"
+Environment="SECRET_KEY=your-secret-key-here"
+ExecStart=/usr/bin/python3 /opt/audit-system/app.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Docker 部署
+
+```bash
+docker run -d \
+  -e AUDIT_ADMIN_USER=admin \
+  -e AUDIT_ADMIN_PASSWORD=SecurePass123! \
+  -e SECRET_KEY=your-secret-key \
+  -p 5000:5000 \
+  -v /opt/audit-data:/app/data \
+  audit-system:latest
+```
+
+#### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  audit-system:
+    image: audit-system:latest
+    environment:
+      - AUDIT_ADMIN_USER=admin
+      - AUDIT_ADMIN_PASSWORD=${AUDIT_ADMIN_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: always
+```
+
+### 12.4 安全建议
+
+1. **强密码策略**：密码至少 12 位，包含大小写字母、数字、特殊字符
+2. **定期轮换**：建议每 90 天更换一次密码
+3. **环境变量保护**：生产环境使用密钥管理服务（如 HashiCorp Vault）
+4. **审计记录**：密码更新操作应被记录到审计日志
+5. **多因素认证**：建议启用 TOTP 双因素认证
+
+---
+
+## 13. 中控台系统设计
+
+### 13.1 设计目标
+
+- **统一监控**：在本地部署中控台，同时查看多个服务器的审计数据
+- **实时告警**：汇总所有服务器的告警信息
+- **跨服务器分析**：支持跨服务器的日志查询和统计分析
+- **集中管理**：统一的用户界面，无需逐个登录服务器
+
+### 13.2 系统架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    本地中控台 (Control Center)               │
+│                     http://localhost:8000                   │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  统一管理界面 (Unified Dashboard)                     │  │
+│  │  ┌────────────────────────────────────────────────┐  │  │
+│  │  │  服务器状态卡片                                 │  │  │
+│  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐       │  │  │
+│  │  │  │ Server 1 │ │ Server 2 │ │ Server 3 │       │  │  │
+│  │  │  │ 在线     │ │ 在线     │ │ 离线     │       │  │  │
+│  │  │  │ L5: 2    │ │ L5: 0    │ │ -        │       │  │  │
+│  │  │  │ L4: 5    │ │ L4: 3    │ │ -        │       │  │  │
+│  │  │  └──────────┘ └──────────┘ └──────────┘       │  │  │
+│  │  └────────────────────────────────────────────────┘  │  │
+│  │  ┌────────────────────────────────────────────────┐  │  │
+│  │  │  实时告警汇总                                   │  │  │
+│  │  │  🔴 [Server 1] 删除 /etc/passwd                │  │  │
+│  │  │  🟠 [Server 2] sudo 权限提升                   │  │  │
+│  │  │  🟡 [Server 1] 修改配置文件                    │  │  │
+│  │  └────────────────────────────────────────────────┘  │  │
+│  │  ┌────────────────────────────────────────────────┐  │  │
+│  │  │  跨服务器日志查询                               │  │  │
+│  │  │  [时间范围] [用户] [风险级别] [服务器] [搜索]  │  │  │
+│  │  └────────────────────────────────────────────────┘  │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                           │                                 │
+│              ┌────────────┼────────────┐                    │
+│              │            │            │                    │
+│              ▼            ▼            ▼                    │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
+│  │ API Client  │  │ API Client  │  │ API Client  │        │
+│  │ (JWT Auth)  │  │ (JWT Auth)  │  │ (JWT Auth)  │        │
+│  └─────────────┘  └─────────────┘  └─────────────┘        │
+└─────────────────────────────────────────────────────────────┘
+         │                 │                 │
+         │ HTTPS           │ HTTPS           │ HTTPS
+         │ REST API        │ REST API        │ REST API
+         ▼                 ▼                 ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│  服务器 1     │  │  服务器 2     │  │  服务器 3     │
+│ 192.168.1.10 │  │ 192.168.1.11 │  │ 192.168.1.12 │
+│              │  │              │  │              │
+│ Audit System │  │ Audit System │  │ Audit System │
+│ + REST API   │  │ + REST API   │  │ + REST API   │
+│ Port: 5000   │  │ Port: 5000   │  │ Port: 5000   │
+└──────────────┘  └──────────────┘  └──────────────┘
+```
+
+### 13.3 服务器端 REST API 扩展
+
+在每台服务器的审计系统中添加 REST API 支持。
+
+#### 13.3.1 API 认证
+
+```python
+# api/auth.py
+import jwt
+from datetime import datetime, timedelta
+from flask import Blueprint, request, jsonify, current_app
+from werkzeug.security import check_password_hash
+
+auth_bp = Blueprint('api_auth', __name__, url_prefix='/api/v1/auth')
+
+@auth_bp.route('/token', methods=['POST'])
+def generate_token():
+    """
+    中控台获取 API Token
+    
+    请求体：
+    {
+        "username": "admin",
+        "password": "password"
+    }
+    
+    响应：
+    {
+        "token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+        "expires_in": 86400
+    }
+    """
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    
+    # 验证 admin 账户
+    if username == current_app.config['ADMIN_USERNAME']:
+        if check_password_hash(current_app.config['ADMIN_PASSWORD_HASH'], password):
+            # 生成 JWT Token
+            token = jwt.encode({
+                'client_id': 'control_center',
+                'username': username,
+                'exp': datetime.utcnow() + timedelta(hours=24)
+            }, current_app.config['API_SECRET_KEY'], algorithm='HS256')
+            
+            return jsonify({
+                'token': token,
+                'expires_in': 86400
+            })
+    
+    return jsonify({'error': 'Invalid credentials'}), 401
+```
+
+#### 13.3.2 API 路由
+
+```python
+# api/routes.py
+from flask import Blueprint, request, jsonify, g
+from functools import wraps
+import jwt
+
+api_bp = Blueprint('api', __name__, url_prefix='/api/v1')
+
+def api_auth_required(f):
+    """API 认证装饰器"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        
+        if not token:
+            return jsonify({'error': 'Missing token'}), 401
+        
+        try:
+            payload = jwt.decode(
+                token, 
+                current_app.config['API_SECRET_KEY'], 
+                algorithms=['HS256']
+            )
+            g.api_client = payload['client_id']
+            g.api_username = payload['username']
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+        
+        return f(*args, **kwargs)
+    return decorated
+
+@api_bp.route('/logs', methods=['GET'])
+@api_auth_required
+def get_logs():
+    """
+    查询审计日志
+    
+    查询参数：
+    - start: 开始时间 (ISO 8601)
+    - end: 结束时间 (ISO 8601)
+    - user: 用户名
+    - risk_min: 最小风险级别 (1-5)
+    - category: 操作分类
+    - page: 页码 (默认 1)
+    - per_page: 每页数量 (默认 50)
+    """
+    # 参数解析
+    start = request.args.get('start')
+    end = request.args.get('end')
+    user = request.args.get('user')
+    risk_min = request.args.get('risk_min', type=int)
+    category = request.args.get('category')
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 50, type=int)
+    
+    # 构建查询
+    conn = get_db()
+    query = "SELECT * FROM audit_logs WHERE 1=1"
+    params = []
+    
+    if start:
+        query += " AND timestamp >= ?"
+        params.append(start)
+    if end:
+        query += " AND timestamp <= ?"
+        params.append(end)
+    if user:
+        query += " AND username = ?"
+        params.append(user)
+    if risk_min:
+        query += " AND risk_level >= ?"
+        params.append(risk_min)
+    if category:
+        query += " AND action_category = ?"
+        params.append(category)
+    
+    # 总数
+    count_query = query.replace('SELECT *', 'SELECT COUNT(*)')
+    total = conn.execute(count_query, params).fetchone()[0]
+    
+    # 分页
+    offset = (page - 1) * per_page
+    query += f" ORDER BY timestamp DESC LIMIT {per_page} OFFSET {offset}"
+    
+    cursor = conn.execute(query, params)
+    logs = [dict(row) for row in cursor.fetchall()]
+    
+    conn.close()
+    
+    return jsonify({
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'data': logs
+    })
+
+@api_bp.route('/stats', methods=['GET'])
+@api_auth_required
+def get_stats():
+    """获取统计数据"""
+    conn = get_db()
+    
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    stats = {
+        'total_logs': conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0],
+        'today_logs': conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE DATE(timestamp) = ?", (today,)
+        ).fetchone()[0],
+        'critical_count': conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE risk_level = 5"
+        ).fetchone()[0],
+        'high_count': conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE risk_level = 4"
+        ).fetchone()[0],
+        'online_users': conn.execute(
+            "SELECT COUNT(*) FROM login_sessions WHERE is_active = 1"
+        ).fetchone()[0],
+        'unread_alerts': conn.execute(
+            "SELECT COUNT(*) FROM alerts WHERE is_read = 0"
+        ).fetchone()[0]
+    }
+    
+    conn.close()
+    return jsonify(stats)
+
+@api_bp.route('/alerts', methods=['GET'])
+@api_auth_required
+def get_alerts():
+    """获取告警列表"""
+    unread_only = request.args.get('unread_only', 'false').lower() == 'true'
+    
+    conn = get_db()
+    query = "SELECT * FROM alerts"
+    
+    if unread_only:
+        query += " WHERE is_read = 0"
+    
+    query += " ORDER BY created_at DESC LIMIT 100"
+    
+    cursor = conn.execute(query)
+    alerts = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({'data': alerts})
+
+@api_bp.route('/server/info', methods=['GET'])
+@api_auth_required
+def get_server_info():
+    """获取服务器基本信息"""
+    import socket
+    import platform
+    
+    return jsonify({
+        'hostname': socket.gethostname(),
+        'platform': platform.system(),
+        'version': platform.version(),
+        'python_version': platform.python_version()
+    })
+```
+
+### 13.4 中控台应用实现
+
+#### 13.4.1 服务器配置
+
+```python
+# control_center/config.py
+SERVERS = [
+    {
+        'id': 'prod-server-1',
+        'name': '生产服务器 1',
+        'url': 'https://192.168.1.10:5000',
+        'username': 'admin',
+        'password': 'password1',
+        'description': 'Web 应用服务器'
+    },
+    {
+        'id': 'prod-server-2',
+        'name': '生产服务器 2',
+        'url': 'https://192.168.1.11:5000',
+        'username': 'admin',
+        'password': 'password2',
+        'description': '数据库服务器'
+    },
+    {
+        'id': 'test-server',
+        'name': '测试服务器',
+        'url': 'https://192.168.1.12:5000',
+        'username': 'admin',
+        'password': 'password3',
+        'description': '测试环境'
+    }
+]
+```
+
+#### 13.4.2 API 客户端
+
+```python
+# control_center/api_client.py
+import requests
+from datetime import datetime
+import logging
+
+class AuditAPIClient:
+    """审计系统 API 客户端"""
+    
+    def __init__(self, server_config):
+        self.server_id = server_config['id']
+        self.server_name = server_config['name']
+        self.base_url = server_config['url']
+        self.username = server_config['username']
+        self.password = server_config['password']
+        self.token = None
+        self.token_expires = None
+        self.logger = logging.getLogger(f'APIClient[{self.server_id}]')
+    
+    def authenticate(self):
+        """获取 API Token"""
+        try:
+            resp = requests.post(
+                f"{self.base_url}/api/v1/auth/token",
+                json={'username': self.username, 'password': self.password},
+                timeout=10,
+                verify=False  # 生产环境应验证证书
+            )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                self.token = data['token']
+                self.token_expires = datetime.now().timestamp() + data['expires_in']
+                self.logger.info(f'认证成功')
+                return True
+            else:
+                self.logger.error(f'认证失败: {resp.status_code}')
+        except Exception as e:
+            self.logger.error(f'认证异常: {e}')
+        
+        return False
+    
+    def _ensure_token(self):
+        """确保 Token 有效"""
+        if not self.token or datetime.now().timestamp() >= self.token_expires:
+            return self.authenticate()
+        return True
+    
+    def _request(self, method, endpoint, **kwargs):
+        """统一请求方法"""
+        if not self._ensure_token():
+            return None
+        
+        try:
+            resp = requests.request(
+                method,
+                f"{self.base_url}{endpoint}",
+                headers={'Authorization': f'Bearer {self.token}'},
+                timeout=kwargs.pop('timeout', 30),
+                verify=False,
+                **kwargs
+            )
+            
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                self.logger.error(f'{method} {endpoint} 失败: {resp.status_code}')
+        except Exception as e:
+            self.logger.error(f'{method} {endpoint} 异常: {e}')
+        
+        return None
+    
+    def get_logs(self, **params):
+        """查询日志"""
+        return self._request('GET', '/api/v1/logs', params=params)
+    
+    def get_stats(self):
+        """获取统计数据"""
+        return self._request('GET', '/api/v1/stats')
+    
+    def get_alerts(self, unread_only=False):
+        """获取告警"""
+        return self._request('GET', '/api/v1/alerts', 
+                           params={'unread_only': str(unread_only).lower()})
+    
+    def get_server_info(self):
+        """获取服务器信息"""
+        return self._request('GET', '/api/v1/server/info')
+```
+
+#### 13.4.3 中控台主应用
+
+```python
+# control_center/app.py
+from flask import Flask, render_template, request, jsonify
+from config import SERVERS
+from api_client import AuditAPIClient
+import logging
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'control-center-secret-key'
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s'
+)
+
+# 初始化所有服务器客户端
+server_clients = {
+    server['id']: AuditAPIClient(server)
+    for server in SERVERS
+}
+
+@app.route('/')
+def dashboard():
+    """统一仪表盘"""
+    return render_template('dashboard.html', servers=SERVERS)
+
+@app.route('/api/servers')
+def list_servers():
+    """服务器列表"""
+    return jsonify({'servers': SERVERS})
+
+@app.route('/api/servers/<server_id>/stats')
+def server_stats(server_id):
+    """单个服务器统计"""
+    client = server_clients.get(server_id)
+    if not client:
+        return jsonify({'error': 'Server not found'}), 404
+    
+    stats = client.get_stats()
+    if stats:
+        stats['server_id'] = server_id
+        stats['server_name'] = client.server_name
+        stats['status'] = 'online'
+        return jsonify(stats)
+    
+    return jsonify({
+        'server_id': server_id,
+        'server_name': client.server_name,
+        'status': 'offline'
+    })
+
+@app.route('/api/servers/all/stats')
+def all_servers_stats():
+    """所有服务器统计汇总"""
+    results = []
+    
+    for server_id, client in server_clients.items():
+        stats = client.get_stats()
+        if stats:
+            stats['server_id'] = server_id
+            stats['server_name'] = client.server_name
+            stats['status'] = 'online'
+        else:
+            stats = {
+                'server_id': server_id,
+                'server_name': client.server_name,
+                'status': 'offline'
+            }
+        
+        results.append(stats)
+    
+    return jsonify({'servers': results})
+
+@app.route('/api/servers/<server_id>/logs')
+def server_logs(server_id):
+    """单个服务器日志"""
+    client = server_clients.get(server_id)
+    if not client:
+        return jsonify({'error': 'Server not found'}), 404
+    
+    # 传递查询参数
+    params = {k: v for k, v in request.args.items()}
+    
+    logs = client.get_logs(**params)
+    if logs:
+        return jsonify(logs)
+    
+    return jsonify({'error': 'Failed to fetch logs'}), 500
+
+@app.route('/api/servers/all/alerts')
+def all_servers_alerts():
+    """所有服务器告警汇总"""
+    all_alerts = []
+    
+    for server_id, client in server_clients.items():
+        alerts_data = client.get_alerts(unread_only=True)
+        if alerts_data:
+            for alert in alerts_data.get('data', []):
+                alert['server_id'] = server_id
+                alert['server_name'] = client.server_name
+                all_alerts.append(alert)
+    
+    # 按时间排序
+    all_alerts.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+    
+    return jsonify({'data': all_alerts})
+
+@app.route('/logs')
+def logs_page():
+    """日志查询页面"""
+    return render_template('logs.html', servers=SERVERS)
+
+@app.route('/alerts')
+def alerts_page():
+    """告警中心页面"""
+    return render_template('alerts.html', servers=SERVERS)
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=8000, debug=True)
+```
+
+### 13.5 中控台前端界面
+
+前端界面使用简洁的 HTML + JavaScript 实现，支持：
+
+- **服务器状态卡片**：实时显示每台服务器的统计数据
+- **告警汇总**：跨服务器的告警列表
+- **日志查询**：支持选择服务器、时间范围、用户等条件查询
+- **自动刷新**：每 30 秒自动刷新数据
+
+详细前端代码见 `templates/dashboard.html`。
+
+### 13.6 部署方案
+
+#### 13.6.1 服务器端部署
+
+```bash
+# 每台服务器
+cd /opt/audit-system
+
+# 设置环境变量
+export AUDIT_ADMIN_PASSWORD=SecurePassword123!
+export API_SECRET_KEY=api-secret-key-change-me
+export SECRET_KEY=flask-secret-key
+
+# 启动应用（使用 gunicorn）
+gunicorn -w 4 -b 0.0.0.0:5000 \
+  --certfile=/etc/ssl/certs/server.crt \
+  --keyfile=/etc/ssl/private/server.key \
+  app:app
+```
+
+#### 13.6.2 中控台部署
+
+```bash
+# 本地机器
+cd /opt/control-center
+
+# 安装依赖
+pip install flask requests
+
+# 编辑服务器配置
+vim config.py
+
+# 启动中控台
+python app.py
+
+# 访问
+open http://localhost:8000
+```
+
+### 13.7 安全建议
+
+1. **HTTPS 通信**：服务器端必须启用 HTTPS
+2. **Token 管理**：定期轮换 API Secret Key
+3. **IP 白名单**：限制中控台访问服务器的 IP
+4. **密码管理**：使用密钥管理服务存储服务器密码
+5. **审计日志**：中控台的操作也应被记录
+6. **访问控制**：中控台应有独立的认证机制
+7. **网络隔离**：中控台与服务器之间使用专用网络
+
+### 13.8 功能扩展
+
+未来可扩展的功能：
+
+- **实时推送**：使用 WebSocket 实现实时告警推送
+- **数据聚合**：跨服务器的统计分析和报表生成
+- **批量操作**：批量查询、批量导出
+- **拓扑视图**：服务器拓扑关系可视化
+- **智能告警**：基于机器学习的异常检测
+
+---
+
 ## 附录：操作风险速查表
 
 | 操作类型 | 默认级别 | 敏感路径 | 深夜 | 批量 |
@@ -1030,5 +1817,6 @@ def init_db():
 
 ---
 
-*文档版本：v1.0 | 最后更新：2025-03*  
-*适用范围：基于 Flask + SQLite + Werkzeug 技术栈的服务器审计系统*
+*文档版本：v2.0 | 最后更新：2026-05-28*  
+*适用范围：基于 Flask + SQLite + Werkzeug 技术栈的服务器审计系统*  
+*新增功能：Admin 密码管理 · 中控台系统*
