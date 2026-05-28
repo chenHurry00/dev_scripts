@@ -47,7 +47,46 @@ python app.py
 
 ```
 audit_system/
-├── app.py                    # 主应用（包含 Admin 密码管理）
+├── app.py                          # Flask 主应用
+├── config.py                       # 配置文件
+├── start.sh                        # 启动脚本
+├── README.md                       # 主文档
+│
+├── audit_command_buffer.py         # 命令审计（高性能缓冲版）
+├── audit_bash_hook.sh              # Bash 钩子
+├── sync_buffer.py                  # 后台同步服务
+├── install_command_audit.sh        # 安装脚本
+│
+├── models/                         # 数据库模型
+├── audit/                          # 审计模块
+├── api/                            # API 层
+├── admin/                          # 管理模块
+├── static/                         # 静态文件
+├── templates/                      # HTML 模板
+│
+├── tests/                          # 测试文件
+│   ├── test_system.py              # 系统测试
+│   ├── test_command_audit.sh       # 命令审计测试
+│   ├── check_stability.py          # 稳定性检查
+│   └── check_summary.sh            # 检查总结
+│
+├── tools/                          # 工具脚本
+│   ├── optimize.sh                 # 性能优化脚本
+│   └── view_audit_logs.py          # 日志查看工具
+│
+├── docs/                           # 文档
+│   ├── COMMAND_AUDIT.md            # 命令审计文档
+│   ├── STABILITY_REPORT.md         # 稳定性报告
+│   └── USAGE.sh                    # 使用指南
+│
+├── deprecated/                     # 弃用文件（仅供参考）
+│   ├── audit_command.py            # 原版（性能差）
+│   ├── audit_command_fast.py       # 快速版
+│   └── import_command_logs.py      # 手动导入工具
+│
+├── data/                           # 数据库
+└── logs/                           # 日志
+```
 ├── config.py                 # 配置管理
 ├── requirements.txt          # 依赖列表
 ├── test_system.py           # 功能测试脚本
