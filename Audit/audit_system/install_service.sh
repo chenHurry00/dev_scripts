@@ -10,6 +10,76 @@ AUDIT_DIR="$SCRIPT_DIR"
 # 默认端口
 DEFAULT_PORT=5000
 
+# 检查依赖
+check_dependencies() {
+    local missing_deps=()
+    local missing_pip_packages=()
+
+    if ! command -v python3 &> /dev/null; then
+        missing_deps+=("python3")
+    fi
+
+    if ! command -v sqlite3 &> /dev/null; then
+        missing_deps+=("sqlite3")
+    fi
+
+    if ! command -v pip3 &> /dev/null; then
+        missing_deps+=("python3-pip")
+    fi
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "⚠️  缺少系统依赖: ${missing_deps[*]}"
+        echo ""
+
+        if [ "$EUID" -ne 0 ]; then
+            echo "✗ 需要 root 权限安装依赖"
+            exit 1
+        fi
+
+        read -p "是否自动安装？[Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            exit 1
+        fi
+
+        if command -v apt &> /dev/null; then
+            apt update && apt install -y "${missing_deps[@]}"
+        elif command -v yum &> /dev/null; then
+            yum install -y "${missing_deps[@]}"
+        elif command -v dnf &> /dev/null; then
+            dnf install -y "${missing_deps[@]}"
+        elif command -v pacman &> /dev/null; then
+            pacman -S --noconfirm "${missing_deps[@]}"
+        else
+            echo "✗ 无法识别包管理器，请手动安装: ${missing_deps[*]}"
+            exit 1
+        fi
+
+        echo "✓ 系统依赖安装完成"
+    fi
+
+    # 检查 Python 包
+    if ! python3 -c "import flask" 2>/dev/null; then
+        missing_pip_packages+=("flask")
+    fi
+
+    if [ ${#missing_pip_packages[@]} -gt 0 ]; then
+        echo "⚠️  缺少 Python 包: ${missing_pip_packages[*]}"
+        echo ""
+
+        read -p "是否自动安装？[Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            exit 1
+        fi
+
+        pip3 install --break-system-packages --ignore-installed "${missing_pip_packages[@]}"
+        echo "✓ Python 包安装完成"
+    fi
+
+    echo "✓ 依赖检查完成"
+}
+
 # 解析参数
 PORT=$DEFAULT_PORT
 ADMIN_USER="admin"
@@ -66,6 +136,12 @@ if [ "$EUID" -ne 0 ]; then
     echo "请使用: sudo $0"
     exit 1
 fi
+
+# 检查依赖
+echo "【检查依赖】"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+check_dependencies
+echo ""
 
 # 获取当前用户
 REAL_USER="${SUDO_USER:-$USER}"

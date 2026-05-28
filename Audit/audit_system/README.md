@@ -308,12 +308,46 @@ SELECT * FROM audit_logs LIMIT 1;
 ## 🐛 故障排查
 
 ### 问题：无法启动应用
+
 ```bash
-# 检查依赖
-pip install -r requirements.txt
+# 检查依赖（自动安装）
+sudo ./manage.sh  # 选择 1. 安装 Web 服务，会自动检查并安装依赖
+
+# 手动安装依赖（Debian/Ubuntu 24.04+）
+sudo pip3 install --break-system-packages -r requirements.txt
+
+# 或使用系统包（推荐）
+sudo apt install python3-flask python3-jwt
 
 # 检查端口占用
 lsof -i :5000
+```
+
+### 问题：pip 报错 "externally-managed-environment"
+
+这是 Debian/Ubuntu 24.04+ 的新安全策略（PEP 668）。解决方案：
+
+**方案 1：使用脚本自动安装（推荐）**
+```bash
+sudo ./manage.sh  # 会自动处理
+```
+
+**方案 2：手动安装（系统包）**
+```bash
+sudo apt install python3-flask python3-jwt
+```
+
+**方案 3：强制安装（仅用于系统服务）**
+```bash
+sudo pip3 install --break-system-packages --ignore-installed -r requirements.txt
+```
+
+### 问题：pip 报错 "Cannot uninstall blinker"
+
+系统已通过 apt 安装了部分依赖，使用 `--ignore-installed` 跳过：
+
+```bash
+sudo pip3 install --break-system-packages --ignore-installed flask
 ```
 
 ### 问题：无法登录

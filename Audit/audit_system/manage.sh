@@ -3,6 +3,82 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+check_dependencies() {
+    # 检查并安装依赖
+    local missing_deps=()
+    local missing_pip_packages=()
+
+    # 检查系统依赖
+    if ! command -v python3 &> /dev/null; then
+        missing_deps+=("python3")
+    fi
+
+    if ! command -v sqlite3 &> /dev/null; then
+        missing_deps+=("sqlite3")
+    fi
+
+    # 检查 pip
+    if ! command -v pip3 &> /dev/null; then
+        missing_deps+=("python3-pip")
+    fi
+
+    # 安装系统依赖
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "⚠️  缺少系统依赖: ${missing_deps[*]}"
+        echo ""
+
+        if [ "$EUID" -ne 0 ]; then
+            echo "✗ 需要 root 权限安装依赖"
+            return 1
+        fi
+
+        read -p "是否自动安装？[Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            return 1
+        fi
+
+        # 检测包管理器并安装
+        if command -v apt &> /dev/null; then
+            apt update
+            apt install -y "${missing_deps[@]}"
+        elif command -v yum &> /dev/null; then
+            yum install -y "${missing_deps[@]}"
+        elif command -v dnf &> /dev/null; then
+            dnf install -y "${missing_deps[@]}"
+        elif command -v pacman &> /dev/null; then
+            pacman -S --noconfirm "${missing_deps[@]}"
+        else
+            echo "✗ 无法识别包管理器，请手动安装: ${missing_deps[*]}"
+            return 1
+        fi
+
+        echo "✓ 系统依赖安装完成"
+    fi
+
+    # 检查 Python 包
+    if ! python3 -c "import flask" 2>/dev/null; then
+        missing_pip_packages+=("flask")
+    fi
+
+    if [ ${#missing_pip_packages[@]} -gt 0 ]; then
+        echo "⚠️  缺少 Python 包: ${missing_pip_packages[*]}"
+        echo ""
+
+        read -p "是否自动安装？[Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            return 1
+        fi
+
+        # 使用 --break-system-packages 和 --ignore-installed 避免冲突
+        pip3 install --break-system-packages --ignore-installed "${missing_pip_packages[@]}"
+        echo "✓ Python 包安装完成"
+    fi
+
+    return 0
+}
+
 show_menu() {
     echo "╔════════════════════════════════════════════════════════════╗"
     echo "║     审计系统 - 管理工具                                  ║"
@@ -36,6 +112,12 @@ install_service() {
     if [ "$EUID" -ne 0 ]; then
         echo "✗ 需要 root 权限"
         echo "请使用: sudo $0"
+        return 1
+    fi
+
+    # 检查依赖
+    if ! check_dependencies; then
+        echo "✗ 依赖检查失败"
         return 1
     fi
 
