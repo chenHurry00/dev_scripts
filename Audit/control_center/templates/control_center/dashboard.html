@@ -110,6 +110,35 @@
             font-size: 14px;
         }
 
+        .btn {
+            padding: 8px 14px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 14px;
+        }
+
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+
+        .form-inline {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .form-inline input[type="number"] {
+            width: 90px;
+            padding: 7px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
         .log-table {
             width: 100%;
             border-collapse: collapse;
@@ -227,6 +256,49 @@
                 <div class="stat-label">📊 总操作数</div>
                 <div class="stat-value">{{ stats.get('total_logs', 0) }}</div>
             </div>
+
+            <div class="stat-card">
+                <div class="stat-label">💾 服务端备份占用</div>
+                <div class="stat-value">
+                    {% if maintenance_error %}-{% else %}{{ ((maintenance.get('storage', {}).get('backup_bytes', 0)) / 1024 / 1024)|round(1) }}M{% endif %}
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">💿 服务端剩余磁盘</div>
+                <div class="stat-value">
+                    {% if maintenance_error %}-{% else %}{{ ((maintenance.get('storage', {}).get('disk_free_bytes', 0)) / 1024 / 1024 / 1024)|round(1) }}G{% endif %}
+                </div>
+            </div>
+        </div>
+
+        {% if maintenance_error %}
+        <div class="alert alert-error">服务端维护状态获取失败：{{ maintenance_error }}。请确认远程服务器已更新并重启 audit-web。</div>
+        {% endif %}
+
+        <div class="section" style="margin-bottom: 20px;">
+            <div class="section-header">
+                <h2 class="section-title">本地自动下载</h2>
+                <form method="POST" action="{{ url_for('sync_logs', server_id=server.id) }}">
+                    <button type="submit" class="btn btn-primary">立即下载日志</button>
+                </form>
+            </div>
+            <form class="form-inline" method="POST" action="{{ url_for('update_sync_settings', server_id=server.id) }}">
+                <label>
+                    <input type="checkbox" name="auto_log_sync" {% if server.get('auto_log_sync', True) %}checked{% endif %}>
+                    开启自动下载
+                </label>
+                <label>
+                    间隔
+                    <input type="number" name="sync_interval_minutes" min="1" value="{{ server.get('sync_interval_minutes', 5) }}">
+                    分钟
+                </label>
+                <button type="submit" class="btn btn-primary">保存设置</button>
+                <span>最后下载：{{ server.get('last_log_sync')[:19] if server.get('last_log_sync') else '-' }}</span>
+                {% if server.get('last_log_sync_error') %}
+                    <span style="color: #e74c3c;">错误：{{ server.get('last_log_sync_error') }}</span>
+                {% endif %}
+            </form>
         </div>
 
         <div class="section">
@@ -266,6 +338,42 @@
             </table>
             {% else %}
             <p style="text-align: center; color: #999; padding: 20px;">暂无日志</p>
+            {% endif %}
+        </div>
+
+        <div class="section" style="margin-top: 20px;">
+            <div class="section-header">
+                <h2 class="section-title">中控台本地日志</h2>
+                <a href="{{ url_for('local_logs', server_id=server.id) }}" class="btn-view-all">查看全部 →</a>
+            </div>
+
+            {% if local_logs %}
+            <table class="log-table">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>用户</th>
+                        <th>操作</th>
+                        <th>目标</th>
+                        <th>风险</th>
+                        <th>结果</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in local_logs %}
+                    <tr>
+                        <td>{{ log.timestamp[:19] }}</td>
+                        <td>{{ log.username }}</td>
+                        <td>{{ log.action_type }}</td>
+                        <td>{{ log.target_resource[:40] if log.target_resource else '' }}</td>
+                        <td>{{ log.risk_label }}</td>
+                        <td>{{ log.result }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="text-align: center; color: #999; padding: 20px;">暂无本地下载日志</p>
             {% endif %}
         </div>
     </div>

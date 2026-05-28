@@ -190,8 +190,7 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl start audit-web audit-sync
-    systemctl enable audit-web audit-sync
+    systemctl start audit-web
 
     echo ""
     echo "【配置数据库】"
@@ -210,6 +209,8 @@ EOF
 
     if [ ! -f "$DB_PATH" ]; then
         echo "⚠️  数据库未创建，请访问 Web 界面触发初始化"
+        systemctl start audit-sync
+        systemctl enable audit-web audit-sync
         echo ""
         echo "✓ 安装完成"
         echo ""
@@ -218,6 +219,8 @@ EOF
         echo "密码: $password"
         return 0
     fi
+
+    systemctl stop audit-web audit-sync 2>/dev/null
 
     # 添加防重复索引
     INDEX_EXISTS=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_audit_checksum_unique';" 2>/dev/null)
@@ -248,6 +251,9 @@ EOF
     else
         echo "✓ 防重复索引已存在"
     fi
+
+    systemctl start audit-web audit-sync
+    systemctl enable audit-web audit-sync
 
     echo ""
     echo "✓ 安装完成"

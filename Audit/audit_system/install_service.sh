@@ -267,12 +267,7 @@ systemctl daemon-reload
 echo "✓ 已重载 systemd 配置"
 
 systemctl start audit-web
-systemctl start audit-sync
-echo "✓ 已启动服务"
-
-systemctl enable audit-web
-systemctl enable audit-sync
-echo "✓ 已设置开机自启"
+echo "✓ 已启动 Web 服务"
 
 echo ""
 
@@ -288,6 +283,8 @@ sleep 2
 # 添加防重复索引
 DB_PATH="$AUDIT_DIR/data/audit.db"
 if [ -f "$DB_PATH" ]; then
+    systemctl stop audit-web audit-sync 2>/dev/null
+
     INDEX_EXISTS=$(sqlite3 "$DB_PATH" "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_audit_checksum_unique';" 2>/dev/null)
     if [ -z "$INDEX_EXISTS" ]; then
         echo "正在添加防重复索引..."
@@ -302,6 +299,14 @@ if [ -f "$DB_PATH" ]; then
 else
     echo "⚠️  数据库尚未创建，首次访问时会自动初始化"
 fi
+
+systemctl start audit-web
+systemctl start audit-sync
+echo "✓ 已启动服务"
+
+systemctl enable audit-web
+systemctl enable audit-sync
+echo "✓ 已设置开机自启"
 
 echo ""
 

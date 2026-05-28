@@ -16,6 +16,7 @@
 - ✅ 跨服务器日志查询
 - ✅ 告警汇总展示
 - ✅ 统计数据可视化
+- ✅ 自动下载远程审计日志到中控台本地
 
 ## 🚀 快速开始
 
@@ -61,6 +62,8 @@ control_center/
 │
 ├── config/                   # 配置目录
 │   └── servers.json         # 服务器配置（自动生成）
+├── data/                     # 中控台本地数据库
+│   └── control_center.db     # 已下载的远程日志
 │
 └── templates/
     └── control_center/
@@ -132,6 +135,19 @@ control_center/
 - 按风险级别筛选
 - 按操作分类筛选
 - 分页浏览
+
+### 自动下载日志
+- 在服务器仪表盘中开启或暂停自动下载
+- 可配置每台服务器的下载间隔
+- 可点击"立即下载日志"手动拉取一次
+- 下载后的日志保存在 `data/control_center.db`
+
+可通过环境变量控制后台同步线程：
+
+```bash
+export CONTROL_CENTER_LOG_SYNC_ENABLED=true
+export CONTROL_CENTER_LOG_SYNC_INTERVAL=300
+```
 
 ### 告警汇总
 - 所有服务器的未读告警

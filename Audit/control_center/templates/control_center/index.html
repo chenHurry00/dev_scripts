@@ -198,6 +198,9 @@
                     <div>⏰ <strong>添加时间：</strong>{{ server.added_at[:19] }}</div>
                     <div>🔄 <strong>最后检查：</strong>{{ server.last_check[:19] }}</div>
                     <div>🔑 <strong>Token 过期：</strong>{{ server.token_expires_at[:19] }}</div>
+                    <div>💾 <strong>本地日志：</strong>{{ server.local_log_count }} 条</div>
+                    <div>⬇️ <strong>自动下载：</strong>{{ '开启' if server.get('auto_log_sync', True) else '暂停' }}</div>
+                    <div>🕒 <strong>最后下载：</strong>{{ server.get('last_log_sync')[:19] if server.get('last_log_sync') else '-' }}</div>
                 </div>
 
                 <div class="server-actions">

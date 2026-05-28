@@ -8,10 +8,35 @@
     "username": "admin",
     "password": "BY116358",
     "description": "",
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRfaWQiOiJjb250cm9sX2NlbnRlciIsInVzZXJuYW1lIjoiYWRtaW4iLCJleHAiOjE4MTE1MTc4NjN9.pDW4pyI3-Ax6u4N7ekmrttPBofClXiPzqc-SILzCqps",
-    "token_expires_at": "2027-05-28T23:24:23.611899",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRfaWQiOiJjb250cm9sX2NlbnRlciIsInVzZXJuYW1lIjoiYWRtaW4iLCJleHAiOjE4MTE1MjMwMzN9.gvEg_9Q_p-IR7j37csWI9y34OzPEoBwe6RivIMF6Buw",
+    "token_expires_at": "2027-05-29T00:50:33.668556",
     "status": "online",
     "added_at": "2026-05-28T21:45:51.213221",
-    "last_check": "2026-05-28T23:53:24.504028"
+    "last_check": "2026-05-29T00:52:07.391657",
+    "last_log_sync": "2026-05-29T00:50:49.680692",
+    "last_log_sync_error": null,
+    "local_log_count": 25,
+    "auto_log_sync": true,
+    "sync_interval_minutes": 60
+  },
+  {
+    "id": "server_2",
+    "name": "4090",
+    "host": "192.168.2.79",
+    "port": "5500",
+    "base_url": "http://192.168.2.79:5500",
+    "username": "admin",
+    "password": "BY116358",
+    "description": "",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRfaWQiOiJjb250cm9sX2NlbnRlciIsInVzZXJuYW1lIjoiYWRtaW4iLCJleHAiOjE4MTE1MjI4ODN9.vKc7EK5XAK3-NgYRktXnnDk78nUQLS1t1k3MoriqRWE",
+    "token_expires_at": "2027-05-29T00:48:03.006232",
+    "status": "online",
+    "auto_log_sync": true,
+    "sync_interval_minutes": 60,
+    "last_log_sync": "2026-05-29T00:51:45.170012",
+    "last_log_sync_error": null,
+    "added_at": "2026-05-29T00:48:03.006272",
+    "last_check": "2026-05-29T00:53:51.335360",
+    "local_log_count": 6
   }
 ]

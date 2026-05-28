@@ -59,6 +59,7 @@ app.teardown_appcontext(close_db)
 # 注册 API 蓝图
 from api.auth import auth_bp
 from api.routes import api_bp
+from maintenance import maintenance_status, start_auto_maintenance
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(api_bp)
@@ -113,6 +114,8 @@ with app.app_context():
     logger.info(f'数据库: {app.config["AUDIT_DB"]}')
     logger.info(f'日志目录: {app.config["AUDIT_LOG_DIR"]}')
     logger.info('============================================================')
+
+start_auto_maintenance(app)
 
 
 # ============= 认证装饰器 =============
@@ -317,7 +320,14 @@ def dashboard():
         LIMIT 10
     """).fetchall()
 
-    return render_template('admin/dashboard.html', stats=stats, recent_logs=recent_logs)
+    maintenance = maintenance_status(app.config)
+
+    return render_template(
+        'admin/dashboard.html',
+        stats=stats,
+        recent_logs=recent_logs,
+        maintenance=maintenance
+    )
 
 
 @app.route('/logs')

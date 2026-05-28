@@ -1,12 +1,13 @@
 """
 REST API 路由
 """
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, Response, g, current_app
 from datetime import datetime
 import socket
 import platform
 from .auth import api_auth_required
 from models.database import get_db
+from maintenance import storage_summary, maintenance_status, backup_status
 
 api_bp = Blueprint('api', __name__, url_prefix='/api/v1')
 
@@ -27,7 +28,7 @@ def get_logs():
     - per_page: 每页数量 (默认 50)
     """
     # 参数解析
-    start = request.args.get('start')
+    start = request.args.get('start') or request.args.get('since')
     end = request.args.get('end')
     user = request.args.get('user')
     risk_min = request.args.get('risk_min', type=int)
@@ -73,6 +74,32 @@ def get_logs():
         'per_page': per_page,
         'data': logs
     })
+
+
+@api_bp.route('/logs/export', methods=['GET'])
+@api_auth_required
+def export_logs():
+    """导出审计日志（JSON Lines）。"""
+    start = request.args.get('start') or request.args.get('since')
+    per_page = min(request.args.get('limit', 1000, type=int), 5000)
+
+    conn = get_db()
+    query = "SELECT * FROM audit_logs WHERE 1=1"
+    params = []
+    if start:
+        query += " AND timestamp > ?"
+        params.append(start)
+    query += " ORDER BY timestamp ASC LIMIT ?"
+    params.append(per_page)
+
+    rows = conn.execute(query, params).fetchall()
+
+    def generate():
+        import json
+        for row in rows:
+            yield json.dumps(dict(row), ensure_ascii=False) + '\n'
+
+    return Response(generate(), mimetype='application/x-ndjson')
 
 
 @api_bp.route('/stats', methods=['GET'])
@@ -152,3 +179,24 @@ def get_server_info():
         'version': platform.version(),
         'python_version': platform.python_version()
     })
+
+
+@api_bp.route('/storage/summary', methods=['GET'])
+@api_auth_required
+def get_storage_summary():
+    """获取服务端磁盘和日志占用。"""
+    return jsonify(storage_summary(current_app.config))
+
+
+@api_bp.route('/maintenance/status', methods=['GET'])
+@api_auth_required
+def get_maintenance_status():
+    """获取服务端自动维护状态。"""
+    return jsonify(maintenance_status(current_app.config))
+
+
+@api_bp.route('/backups/status', methods=['GET'])
+@api_auth_required
+def get_backups_status():
+    """获取服务端本机备份状态。"""
+    return jsonify(backup_status(current_app.config))

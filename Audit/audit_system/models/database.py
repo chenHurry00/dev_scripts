@@ -64,5 +64,33 @@ def init_db(app):
             )
         """)
 
+        # 服务端本机备份记录
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS backup_records (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_name  TEXT    NOT NULL,
+                backup_path  TEXT,
+                size_bytes   INTEGER DEFAULT 0,
+                status       TEXT    NOT NULL,
+                created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+                error_message TEXT
+            )
+        """)
+
+        # 服务端本机清理记录
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cleanup_logs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at      TEXT    NOT NULL,
+                finished_at     TEXT,
+                status          TEXT    NOT NULL,
+                deleted_db_rows INTEGER DEFAULT 0,
+                deleted_files   INTEGER DEFAULT 0,
+                freed_bytes     INTEGER DEFAULT 0,
+                backup_path     TEXT,
+                error_message   TEXT
+            )
+        """)
+
         db.commit()
         close_db()

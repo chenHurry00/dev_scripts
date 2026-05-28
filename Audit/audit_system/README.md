@@ -15,6 +15,8 @@
 - ✅ **Admin 密码管理**：在 app.py 顶部统一配置，每次启动自动刷新
 - ✅ **REST API**：支持中控台远程访问（JWT 认证）
 - ✅ **中控台支持**：可部署统一管理界面监控多台服务器
+- ✅ **服务端自动维护**：自动备份、备份配额控制、磁盘不足时清理旧日志
+- ✅ **远程日志下载**：中控台可定期拉取远程审计日志到本地保存
 
 ## 🚀 快速开始
 
@@ -188,6 +190,43 @@ curl -X GET "http://localhost:5000/api/v1/alerts?unread_only=true" \
 curl -X GET http://localhost:5000/api/v1/server/info \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
+
+#### 5. 服务端存储状态
+```bash
+curl -X GET http://localhost:5000/api/v1/storage/summary \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+#### 6. 自动维护状态
+```bash
+curl -X GET http://localhost:5000/api/v1/maintenance/status \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+## 🧹 自动维护与中控台同步
+
+### 服务端自动维护
+
+服务端启动后会在进程内自动执行维护，不需要额外脚本：
+
+- 定期创建本机备份包到 `backups/`
+- `backups/` 超过 1GB 或磁盘空间不足时，自动删除旧备份
+- 新备份本身超过 1GB 时，只保留该最新备份并标记超额
+- 磁盘仍不足时，按保留策略清理旧日志和旧低风险数据库记录
+
+可通过环境变量调整：
+
+```bash
+export AUDIT_AUTO_MAINTENANCE_ENABLED=true
+export AUDIT_BACKUP_MAX_BYTES=1073741824
+export AUDIT_MIN_FREE_BYTES=2147483648
+export AUDIT_BACKUP_INTERVAL_HOURS=24
+export AUDIT_CLEANUP_DB_ENABLED=true
+```
+
+### 中控台自动下载远程日志
+
+中控台是独立项目：`../control_center`。服务端只提供日志、存储和维护状态 API，不主动拉取其他服务器日志，也不提供中控台页面。
 
 ## 📊 操作分级体系
 

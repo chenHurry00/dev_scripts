@@ -8,10 +8,12 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / 'data'
 LOGS_DIR = BASE_DIR / 'logs'
+BACKUPS_DIR = BASE_DIR / 'backups'
 
 # 确保目录存在
 DATA_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+BACKUPS_DIR.mkdir(exist_ok=True)
 (LOGS_DIR / 'audit').mkdir(exist_ok=True)
 (LOGS_DIR / 'access').mkdir(exist_ok=True)
 (LOGS_DIR / 'error').mkdir(exist_ok=True)
@@ -38,6 +40,19 @@ class Config:
     ACCESS_LOG_DIR = str(LOGS_DIR / 'access')
     ERROR_LOG_DIR = str(LOGS_DIR / 'error')
     ALERT_LOG_DIR = str(LOGS_DIR / 'alert')
+    BACKUP_DIR = str(BACKUPS_DIR)
+
+    # 服务端自动维护配置
+    AUTO_MAINTENANCE_ENABLED = os.environ.get(
+        'AUDIT_AUTO_MAINTENANCE_ENABLED', 'true'
+    ).lower() == 'true'
+    AUTO_MAINTENANCE_INTERVAL = int(os.environ.get('AUDIT_AUTO_MAINTENANCE_INTERVAL', 300))
+    BACKUP_INTERVAL_HOURS = int(os.environ.get('AUDIT_BACKUP_INTERVAL_HOURS', 24))
+    BACKUP_MAX_BYTES = int(os.environ.get('AUDIT_BACKUP_MAX_BYTES', 1024 * 1024 * 1024))
+    MIN_FREE_BYTES = int(os.environ.get('AUDIT_MIN_FREE_BYTES', 2 * 1024 * 1024 * 1024))
+    KEEP_LAST_BACKUP = os.environ.get('AUDIT_KEEP_LAST_BACKUP', 'true').lower() == 'true'
+    CLEANUP_DB_ENABLED = os.environ.get('AUDIT_CLEANUP_DB_ENABLED', 'true').lower() == 'true'
+
 
     # 会话配置
     SESSION_TIMEOUT = 1800  # 30 分钟

@@ -5,6 +5,9 @@ import os
 import json
 import requests
 import logging
+import sqlite3
+import threading
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, flash, redirect, url_for
@@ -23,6 +26,42 @@ logger = logging.getLogger(__name__)
 CONFIG_DIR = Path(__file__).parent / 'config'
 CONFIG_DIR.mkdir(exist_ok=True)
 SERVERS_CONFIG_FILE = CONFIG_DIR / 'servers.json'
+DATA_DIR = Path(__file__).parent / 'data'
+DATA_DIR.mkdir(exist_ok=True)
+LOCAL_DB = DATA_DIR / 'control_center.db'
+
+SYNC_ENABLED = os.environ.get('CONTROL_CENTER_LOG_SYNC_ENABLED', 'true').lower() == 'true'
+SYNC_INTERVAL = int(os.environ.get('CONTROL_CENTER_LOG_SYNC_INTERVAL', 300))
+_sync_started = False
+
+
+def init_local_db():
+    """初始化中控台本地日志库"""
+    conn = sqlite3.connect(LOCAL_DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS downloaded_logs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id       TEXT    NOT NULL,
+            remote_log_id   INTEGER NOT NULL,
+            timestamp       TEXT    NOT NULL,
+            username        TEXT    NOT NULL,
+            ip_address      TEXT,
+            action_category TEXT,
+            action_type     TEXT,
+            target_resource TEXT,
+            risk_level      INTEGER,
+            risk_label      TEXT,
+            result          TEXT,
+            checksum        TEXT,
+            downloaded_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(server_id, remote_log_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+init_local_db()
 
 
 class ServerManager:
@@ -102,6 +141,10 @@ class ServerManager:
                     'token': token,
                     'token_expires_at': expires_at,
                     'status': 'online',
+                    'auto_log_sync': True,
+                    'sync_interval_minutes': 5,
+                    'last_log_sync': None,
+                    'last_log_sync_error': None,
                     'added_at': datetime.now().isoformat(),
                     'last_check': datetime.now().isoformat()
                 }
@@ -237,9 +280,183 @@ class ServerManager:
             self._save_servers()
             return False, f'请求异常: {str(e)}'
 
+    def update_log_sync(self, server_id, enabled, interval_minutes):
+        """更新本地自动下载配置"""
+        server = self.get_server(server_id)
+        if not server:
+            return False, '服务器不存在'
+        server['auto_log_sync'] = enabled
+        server['sync_interval_minutes'] = max(int(interval_minutes), 1)
+        self._save_servers()
+        return True, '自动下载配置已更新'
+
+
+class LocalLogStore:
+    """中控台本地日志存储"""
+
+    def __init__(self, db_path):
+        self.db_path = Path(db_path)
+
+    def latest_timestamp(self, server_id):
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT MAX(timestamp) FROM downloaded_logs WHERE server_id = ?",
+            (server_id,)
+        ).fetchone()
+        conn.close()
+        return row[0] if row and row[0] else None
+
+    def insert_logs(self, server_id, logs):
+        conn = sqlite3.connect(self.db_path)
+        inserted = 0
+        for log in logs:
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO downloaded_logs (
+                    server_id, remote_log_id, timestamp, username, ip_address,
+                    action_category, action_type, target_resource,
+                    risk_level, risk_label, result, checksum
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                server_id, log.get('id'), log.get('timestamp'), log.get('username', ''),
+                log.get('ip_address'), log.get('action_category'), log.get('action_type'),
+                log.get('target_resource'), log.get('risk_level'), log.get('risk_label'),
+                log.get('result'), log.get('checksum')
+            ))
+            if cursor.rowcount:
+                inserted += 1
+        conn.commit()
+        conn.close()
+        return inserted
+
+    def recent_logs(self, server_id, limit=50):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT * FROM downloaded_logs
+            WHERE server_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (server_id, limit)).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def count_logs(self, server_id):
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT COUNT(*) FROM downloaded_logs WHERE server_id = ?",
+            (server_id,)
+        ).fetchone()
+        conn.close()
+        return row[0] if row else 0
+
+    def query_logs(self, server_id, page=1, per_page=50, username=None, risk_min=None, category=None):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+
+        query = "SELECT * FROM downloaded_logs WHERE server_id = ?"
+        params = [server_id]
+
+        if username:
+            query += " AND username = ?"
+            params.append(username)
+        if risk_min:
+            query += " AND risk_level >= ?"
+            params.append(risk_min)
+        if category:
+            query += " AND action_category = ?"
+            params.append(category)
+
+        total = conn.execute(
+            query.replace('SELECT *', 'SELECT COUNT(*)'),
+            params
+        ).fetchone()[0]
+
+        offset = (page - 1) * per_page
+        rows = conn.execute(
+            query + " ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset]
+        ).fetchall()
+
+        users = conn.execute("""
+            SELECT DISTINCT username FROM downloaded_logs
+            WHERE server_id = ?
+            ORDER BY username
+        """, (server_id,)).fetchall()
+
+        conn.close()
+        return {
+            'logs': [dict(row) for row in rows],
+            'users': [dict(row) for row in users],
+            'total': total,
+        }
+
+
+local_log_store = LocalLogStore(LOCAL_DB)
+
+
+def sync_server_logs(server_id):
+    """下载单台服务器新增日志到中控台本地"""
+    since = local_log_store.latest_timestamp(server_id)
+    params = {'page': 1, 'per_page': 500}
+    if since:
+        params['since'] = since
+
+    success, logs_data = server_manager.api_request(
+        server_id, '/api/v1/logs', params=params, timeout=20
+    )
+    server = server_manager.get_server(server_id)
+
+    if not success:
+        if server:
+            server['last_log_sync_error'] = logs_data
+            server_manager._save_servers()
+        return False, logs_data, 0
+
+    inserted = local_log_store.insert_logs(server_id, logs_data.get('data', []))
+    if server:
+        server['last_log_sync'] = datetime.now().isoformat()
+        server['last_log_sync_error'] = None
+        server_manager._save_servers()
+    return True, '同步完成', inserted
+
+
+def _sync_due(server):
+    if not server.get('auto_log_sync', True):
+        return False
+    last_sync = server.get('last_log_sync')
+    if not last_sync:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last_sync)
+    except ValueError:
+        return True
+    interval = int(server.get('sync_interval_minutes', 5))
+    return datetime.now() - last_dt >= timedelta(minutes=interval)
+
+
+def start_log_sync_thread():
+    """启动中控台本地自动下载线程"""
+    global _sync_started
+    if _sync_started or not SYNC_ENABLED:
+        return
+    if app.config.get('DEBUG') and os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        return
+    _sync_started = True
+
+    def loop():
+        while True:
+            for server in server_manager.get_all_servers():
+                if _sync_due(server):
+                    sync_server_logs(server['id'])
+            time.sleep(SYNC_INTERVAL)
+
+    thread = threading.Thread(target=loop, name='control-center-log-sync', daemon=True)
+    thread.start()
+
 
 # 初始化服务器管理器
 server_manager = ServerManager(SERVERS_CONFIG_FILE)
+start_log_sync_thread()
 
 
 # ============= 路由 =============
@@ -247,6 +464,8 @@ server_manager = ServerManager(SERVERS_CONFIG_FILE)
 def index():
     """首页 - 服务器列表"""
     servers = server_manager.get_all_servers()
+    for server in servers:
+        server['local_log_count'] = local_log_store.count_logs(server['id'])
     return render_template('control_center/index.html', servers=servers)
 
 
@@ -316,11 +535,76 @@ def server_dashboard(server_id):
         server_id, '/api/v1/logs', params={'per_page': 10}
     )
     logs = logs_data.get('data', []) if success else []
+    local_logs = local_log_store.recent_logs(server_id, 10)
+
+    success_maintenance, maintenance = server_manager.api_request(
+        server_id, '/api/v1/maintenance/status'
+    )
+    maintenance_error = None
+    if not success_maintenance:
+        maintenance_error = maintenance
+        maintenance = {}
 
     return render_template('control_center/dashboard.html',
                          server=server,
                          stats=stats,
-                         logs=logs)
+                         logs=logs,
+                         local_logs=local_logs,
+                         maintenance=maintenance,
+                         maintenance_error=maintenance_error)
+
+
+@app.route('/servers/<server_id>/sync-logs', methods=['POST'])
+def sync_logs(server_id):
+    """手动下载远程日志到中控台本地"""
+    success, message, inserted = sync_server_logs(server_id)
+    if success:
+        flash(f'✓ {message}，新增 {inserted} 条', 'success')
+    else:
+        flash(f'✗ 下载失败: {message}', 'error')
+    return redirect(url_for('server_dashboard', server_id=server_id))
+
+
+@app.route('/servers/<server_id>/sync-settings', methods=['POST'])
+def update_sync_settings(server_id):
+    """更新自动下载设置"""
+    enabled = request.form.get('auto_log_sync') == 'on'
+    interval = request.form.get('sync_interval_minutes', 5)
+    success, message = server_manager.update_log_sync(server_id, enabled, interval)
+    flash(('✓ ' if success else '✗ ') + message, 'success' if success else 'error')
+    return redirect(url_for('server_dashboard', server_id=server_id))
+
+
+@app.route('/servers/<server_id>/local-logs')
+def local_logs(server_id):
+    """中控台本地已下载日志查询"""
+    server = server_manager.get_server(server_id)
+    if not server:
+        flash('服务器不存在', 'error')
+        return redirect(url_for('index'))
+
+    page = request.args.get('page', 1, type=int)
+    per_page = 50
+    risk_min = request.args.get('risk_min', type=int)
+
+    result = local_log_store.query_logs(
+        server_id,
+        page=page,
+        per_page=per_page,
+        username=request.args.get('username'),
+        risk_min=risk_min,
+        category=request.args.get('category')
+    )
+
+    return render_template(
+        'control_center/local_logs.html',
+        server=server,
+        logs=result['logs'],
+        users=result['users'],
+        total=result['total'],
+        page=page,
+        per_page=per_page
+    )
 
 
 @app.route('/servers/<server_id>/logs')
