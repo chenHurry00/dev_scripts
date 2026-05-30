@@ -712,7 +712,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
   margin-bottom: 6px;
 }
 
-.form-input, .form-select {
+.form-input, .form-select, .form-textarea {
   width: 100%;
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -731,7 +731,13 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
-.form-input::placeholder { color: var(--text-lo); }
+.form-textarea {
+  min-height: 88px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.form-input::placeholder, .form-textarea::placeholder { color: var(--text-lo); }
 
 .form-row {
   display: grid;
@@ -1128,7 +1134,8 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
                 <th>服务器名称</th>
                 <th>主机地址</th>
                 <th>Agent 端口</th>
-                <th>数据盘路径</th>
+                <th>挂载根目录</th>
+                <th>检查</th>
                 <th>容器数</th>
                 <th>状态</th>
                 <th>操作</th>
@@ -1229,6 +1236,16 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
       </div>
       <div class="form-row">
         <div class="form-field">
+          <label class="form-label">容器登录用户</label>
+          <input class="form-input" type="text" id="ctr-login-user" placeholder="alice">
+        </div>
+        <div class="form-field">
+          <label class="form-label">PIDs 限制</label>
+          <input class="form-input" type="number" id="ctr-pids" placeholder="512" value="512">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
           <label class="form-label">目标服务器</label>
           <select class="form-select" id="ctr-server">
             <option value="">-- 选择服务器 --</option>
@@ -1236,8 +1253,13 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
         </div>
         <div class="form-field">
           <label class="form-label">镜像</label>
-          <input class="form-input" type="text" id="ctr-image" placeholder="ubuntu:22.04" value="ubuntu:22.04">
+          <input class="form-input" type="text" id="ctr-image" placeholder="lscr.io/linuxserver/openssh-server:latest" value="lscr.io/linuxserver/openssh-server:latest">
         </div>
+      </div>
+      <div class="form-field">
+        <label class="form-label">SSH 公钥</label>
+        <textarea class="form-textarea" id="ctr-ssh-key" placeholder="ssh-rsa AAAA..."></textarea>
+        <div class="form-hint">默认禁用 root 和密码登录。建议填写使用者公钥，否则容器可能无法 SSH 登录。</div>
       </div>
       <div class="form-row">
         <div class="form-field">
@@ -1252,7 +1274,12 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
       <div class="form-field">
         <label class="form-label">SSH 端口（宿主机）</label>
         <input class="form-input" type="number" id="ctr-port" placeholder="32001" value="32001">
-        <div class="form-hint">使用者将通过此端口直连 Docker，请确保端口未被占用</div>
+        <div class="form-hint">使用者将通过此端口直连 Docker。约定范围：32000-32999，请确保端口未被占用。</div>
+      </div>
+      <div class="form-field">
+        <label class="form-label">挂载目录</label>
+        <textarea class="form-textarea" id="ctr-mounts" placeholder="/mnt/data/users/alice|/workspace|rw"></textarea>
+        <div class="form-hint">每行一个挂载：宿主机路径|容器内路径|ro/rw。留空时使用服务器第一个挂载根目录创建默认工作区。</div>
       </div>
       <div id="ssh-result" style="display:none">
         <div class="form-label" style="margin-top:12px">→ 生成的 SSH 登录命令</div>
@@ -1297,10 +1324,21 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
           <input class="form-input" type="number" id="srv-agent-port" placeholder="5001" value="5001">
         </div>
       </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">SSH 显示地址</label>
+          <input class="form-input" type="text" id="srv-ssh-host" placeholder="192.168.1.10">
+          <div class="form-hint">用于生成使用者 SSH 命令，默认等于主机地址</div>
+        </div>
+        <div class="form-field">
+          <label class="form-label">Agent Token</label>
+          <input class="form-input" type="password" id="srv-token" placeholder="部署 Agent 时使用的 Token">
+        </div>
+      </div>
       <div class="form-field">
-        <label class="form-label">数据盘路径（宿主机）</label>
-        <input class="form-input" type="text" id="srv-data" placeholder="/mnt/data" value="/mnt/data">
-        <div class="form-hint">此路径将挂载至容器内的 /workspace，不同服务器可单独配置</div>
+        <label class="form-label">挂载根目录</label>
+        <textarea class="form-textarea" id="srv-mount-roots" placeholder="用户数据|/mnt/data/users|/workspace|rw&#10;公共数据|/data/datasets|/datasets|ro"></textarea>
+        <div class="form-hint">每行一个根目录：名称|宿主机路径|默认容器路径|ro/rw。创建容器时只能选择这些目录下的路径。</div>
       </div>
     </div>
     <div class="modal-foot">
@@ -1410,6 +1448,21 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) closeModal(el.id); });
 });
 
+document.getElementById('ctr-server').addEventListener('change', async e => {
+  const sid = e.target.value;
+  if (!sid) return;
+  const data = await api(`/api/servers/${sid}/defaults`);
+  if (!data.ok) return;
+  document.getElementById('ctr-cpu').value = data.cpu;
+  document.getElementById('ctr-mem').value = data.memory;
+  const user = document.getElementById('ctr-user').value || 'user';
+  const root = (data.mount_roots || [])[0];
+  if (root) {
+    document.getElementById('ctr-mounts').placeholder =
+      `${root.host_path}/${user}|${root.default_container_path || '/workspace'}|${root.readonly ? 'ro' : 'rw'}`;
+  }
+});
+
 /* ═══════════════════════════════════════════════
    TOAST
 ═══════════════════════════════════════════════ */
@@ -1441,6 +1494,29 @@ async function api(url, opts = {}) {
     ...opts
   });
   return r.json();
+}
+
+function parseMountRoots(text) {
+  return (text || '').split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const [name, hostPath, containerPath, mode] = line.split('|').map(x => (x || '').trim());
+    return {
+      name: name || hostPath,
+      host_path: hostPath,
+      default_container_path: containerPath || '/workspace',
+      readonly: mode === 'ro'
+    };
+  }).filter(item => item.host_path && item.host_path.startsWith('/'));
+}
+
+function parseContainerMounts(text) {
+  return (text || '').split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const [hostPath, containerPath, mode] = line.split('|').map(x => (x || '').trim());
+    return {
+      host_path: hostPath,
+      container_path: containerPath || '/workspace',
+      readonly: mode === 'ro'
+    };
+  }).filter(item => item.host_path && item.host_path.startsWith('/'));
 }
 
 /* ═══════════════════════════════════════════════
@@ -1516,6 +1592,7 @@ async function loadContainers() {
       <td style="font-size:11px;color:var(--text-lo)">${c.created_at ? c.created_at.slice(0,16) : '—'}</td>
       <td>${statusBadge(c.status)}</td>
       <td>
+        <button class="btn" onclick="updateResources('${c.id}', '${c.cpu_limit || ''}', '${c.mem_limit || ''}', '${c.pids_limit || 512}')">资源</button>
         <button class="btn btn-danger" onclick="delContainer('${c.id}')">删除</button>
       </td>
     </tr>`).join('');
@@ -1527,7 +1604,7 @@ async function loadServers() {
   document.getElementById('badge-srv').textContent = STATE.servers.length;
   const tbody = document.getElementById('srv-table-body');
   if (!STATE.servers.length) {
-    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">
       <div class="empty-icon">▣</div><div class="empty-title">暂无服务器</div>
       <div class="empty-sub">点击「添加服务器」注册第一台节点</div>
     </div></td></tr>`;
@@ -1538,7 +1615,8 @@ async function loadServers() {
       <td class="td-hi">${s.name}</td>
       <td class="td-mono">${s.host}</td>
       <td class="td-mono">${s.agent_port || 5001}</td>
-      <td class="td-mono">${s.data_path || '/mnt/data'}</td>
+      <td class="td-mono">${(s.mount_roots || []).map(r => r.host_path).join('<br>') || '—'}</td>
+      <td>${(s.checks && s.checks.warnings && s.checks.warnings.length) ? `<span class="badge badge-warn">${s.checks.warnings.length} 警告</span>` : statusBadge(s.status)}</td>
       <td><span class="badge badge-info">${s.containers} 个</span></td>
       <td>${statusBadge(s.status)}</td>
       <td>
@@ -1587,14 +1665,19 @@ function roleBadge(r) {
    ACTIONS
 ═══════════════════════════════════════════════ */
 async function createContainer() {
+  const loginUser = document.getElementById('ctr-login-user').value || document.getElementById('ctr-user').value;
   const body = {
     name:        document.getElementById('ctr-name').value || 'docker_env',
     assigned_to: document.getElementById('ctr-user').value,
+    login_user:  loginUser,
     server_id:   document.getElementById('ctr-server').value,
-    image:       document.getElementById('ctr-image').value || 'ubuntu:22.04',
+    image:       document.getElementById('ctr-image').value || 'lscr.io/linuxserver/openssh-server:latest',
     cpu_limit:   document.getElementById('ctr-cpu').value || '2',
     mem_limit:   document.getElementById('ctr-mem').value || '8g',
-    ssh_port:    parseInt(document.getElementById('ctr-port').value) || 32001
+    pids_limit:  parseInt(document.getElementById('ctr-pids').value) || 512,
+    ssh_port:    parseInt(document.getElementById('ctr-port').value) || 32001,
+    ssh_public_key: document.getElementById('ctr-ssh-key').value,
+    mounts: parseContainerMounts(document.getElementById('ctr-mounts').value)
   };
   const res = await api('/api/containers', { method: 'POST', body: JSON.stringify(body) });
   if (res.ok) {
@@ -1605,6 +1688,21 @@ async function createContainer() {
   } else {
     toast(res.error || '创建失败', 'danger');
   }
+}
+
+async function updateResources(id, cpu, mem, pids) {
+  const nextCpu = prompt('CPU 核数', cpu || '1');
+  if (nextCpu === null) return;
+  const nextMem = prompt('内存限制，例如 8g', mem || '1g');
+  if (nextMem === null) return;
+  const nextPids = prompt('PIDs 限制', pids || '512');
+  if (nextPids === null) return;
+  const res = await api(`/api/containers/${id}/resources`, {
+    method: 'PATCH',
+    body: JSON.stringify({ cpu_limit: nextCpu, mem_limit: nextMem, pids_limit: parseInt(nextPids) || 512 })
+  });
+  if (res.ok) { toast('资源配置已更新', 'ok'); loadContainers(); loadOverview(); }
+  else { toast(res.error || '资源更新失败', 'danger'); }
 }
 
 async function delContainer(id) {
@@ -1618,8 +1716,10 @@ async function addServer() {
     id:         document.getElementById('srv-id').value,
     name:       document.getElementById('srv-name').value,
     host:       document.getElementById('srv-host').value,
+    ssh_host:   document.getElementById('srv-ssh-host').value || document.getElementById('srv-host').value,
     agent_port: parseInt(document.getElementById('srv-agent-port').value) || 5001,
-    data_path:  document.getElementById('srv-data').value || '/mnt/data'
+    agent_token: document.getElementById('srv-token').value,
+    mount_roots: parseMountRoots(document.getElementById('srv-mount-roots').value)
   };
   const res = await api('/api/servers', { method: 'POST', body: JSON.stringify(body) });
   if (res.ok) {
