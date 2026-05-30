@@ -12,7 +12,7 @@
 # 基础配置
 # -------------------------------
 _CMH_NAME="Conda Menu Helper"
-_CMH_VERSION="2026.05.30-menu-clean-onoff-v8"
+_CMH_VERSION="2026.05.30-menu-fast-activate-v9"
 _CMH_INSTALL_DIR="${HOME}/.local/share/conda-menu"
 _CMH_INSTALL_FILE="${_CMH_INSTALL_DIR}/conda-menu.sh"
 _CMH_STATE_DIR="${HOME}/.local/state/conda-menu"
@@ -297,6 +297,31 @@ _cmh_load_conda() {
     return 0
   fi
 
+  # 快速路径：优先尝试已保存目录、CONDA_EXE、PATH。
+  # 旧版会先扫描全部候选路径和 shell 配置，再开始 source，首次使用时会产生不必要的延迟。
+  local fast_root fast_exe fast_p
+  if [[ -s "${_CMH_ROOT_FILE}" ]]; then
+    while IFS= read -r fast_root; do
+      [[ -z "$fast_root" ]] && continue
+      fast_root="${fast_root/#\~/$HOME}"
+      fast_root="$(_cmh_realpath "$fast_root" 2>/dev/null || printf '%s' "$fast_root")"
+      _cmh_try_source_conda_sh "$fast_root/etc/profile.d/conda.sh" && return 0
+      for fast_exe in "$fast_root/bin/conda" "$fast_root/condabin/conda"; do
+        _cmh_try_conda_exe_hook "$fast_exe" && return 0
+      done
+    done < "${_CMH_ROOT_FILE}"
+  fi
+
+  if [[ -n "${CONDA_EXE:-}" ]]; then
+    _cmh_try_conda_exe_hook "${CONDA_EXE}" && return 0
+  fi
+
+  fast_p="$(type -P conda 2>/dev/null || true)"
+  if [[ -n "$fast_p" ]]; then
+    _cmh_try_conda_exe_hook "$fast_p" && return 0
+  fi
+
+  # 慢速兜底：只有快速路径失败时，才完整搜索软链接、常见目录和 shell 配置。
   local roots=()
   local sh_candidates=()
   local exe_candidates=()
@@ -561,11 +586,16 @@ _cmh_env_names_from_dirs() {
 
 _cmh_env_names() {
   _cmh_need_conda >/dev/null 2>&1 || return 1
-  {
-    conda info --envs 2>/dev/null | _cmh_env_names_from_info || true
-    conda env list 2>/dev/null | _cmh_env_names_from_info || true
-    _cmh_env_names_from_dirs || true
-  } | awk 'NF && !seen[$0]++ {print}'
+
+  # `conda env list` 是 `conda info --envs` 的别名，不能重复调用。
+  # 环境目录扫描也只在 conda 输出为空时兜底，避免每次额外执行 `conda info --base`。
+  local names
+  names="$(conda info --envs 2>/dev/null | _cmh_env_names_from_info || true)"
+  if [[ -n "$names" ]]; then
+    printf '%s\n' "$names" | awk 'NF && !seen[$0]++ {print}'
+  else
+    _cmh_env_names_from_dirs | awk 'NF && !seen[$0]++ {print}'
+  fi
 }
 
 _cmh_env_exists() {
@@ -714,7 +744,8 @@ _cmh_choose_env() {
     env="$n"
   fi
 
-  if ! _cmh_env_exists "$env"; then
+  # 当前菜单已经加载过环境数组，不要再次调用 conda 枚举环境。
+  if ! _cmh_env_in_loaded_array "$env"; then
     _cmh_err "环境不存在或当前 conda 未发现：$env" >&2
     return 1
   fi
@@ -733,11 +764,7 @@ _cmh_activate_env() {
     printf "\n"
   fi
 
-  if ! _cmh_env_exists "$env"; then
-    _cmh_err "环境不存在：$env"
-    return 1
-  fi
-
+  # 不提前重复执行环境枚举。若名称无效，直接让 `conda activate` 返回明确错误。
   _cmh_info "正在进入环境：$env"
   if conda activate "$env"; then
     _cmh_record_recent "$env"
@@ -1061,7 +1088,7 @@ _cmh_conda_runtime_on() {
   # 不写 ~/.bashrc，不进入 base。
   if _cmh_need_conda; then
     local root
-    root="$(conda info --base 2>/dev/null || _cmh_guess_conda_root_quiet 2>/dev/null || true)"
+    root="$(_cmh_guess_conda_root_quiet 2>/dev/null || conda info --base 2>/dev/null || true)"
     [[ -n "$root" ]] && _cmh_save_conda_root "$root" >/dev/null 2>&1 || true
     _cmh_ok "Conda ON"
     [[ -n "$root" ]] && printf "根目录：%s\n" "$root"
@@ -1075,7 +1102,7 @@ _cmh_conda_runtime_off() {
   # 当前终端停用 conda：退出已激活环境，移除本 shell 中的 conda 函数和 PATH 入口。
   # 不写 ~/.bashrc。
   local root shlvl guard
-  root="$(conda info --base 2>/dev/null || _cmh_guess_conda_root_quiet 2>/dev/null || true)"
+  root="$(_cmh_guess_conda_root_quiet 2>/dev/null || conda info --base 2>/dev/null || true)"
 
   if _cmh_conda_command_loaded; then
     shlvl="${CONDA_SHLVL:-0}"
@@ -1108,7 +1135,7 @@ _cmh_current_conda_status() {
     status="OFF"
   fi
   env="${CONDA_DEFAULT_ENV:-未激活}"
-  root="$(conda info --base 2>/dev/null || _cmh_guess_conda_root_quiet 2>/dev/null || true)"
+  root="$(_cmh_guess_conda_root_quiet 2>/dev/null || conda info --base 2>/dev/null || true)"
 
   printf "状态：%s\n" "$status"
   printf "当前环境：%s\n" "$env"
@@ -1534,15 +1561,9 @@ _cmh_dispatch() {
       _cmh_main_menu
       ;;
     *)
-      # 兼容：cx myenv 直接激活环境；cx 仍进入菜单。
+      # 兼容：cx myenv 直接激活环境；避免为了预检查再次枚举全部环境。
       _cmh_need_conda || return 1
-      if _cmh_env_exists "$cmd"; then
-        _cmh_activate_env "$cmd"
-      else
-        _cmh_err "未知参数或环境不存在：$cmd"
-        _cmh_info "输入 cx 进入菜单，或 cx help 查看帮助。"
-        return 1
-      fi
+      _cmh_activate_env "$cmd"
       ;;
   esac
 }
