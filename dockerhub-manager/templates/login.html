@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DockerHub Manager — 登录</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-void:    #080a0e;
+    --bg-panel:   #0d1117;
+    --bg-card:    #111720;
+    --bg-input:   #161d28;
+    --border:     #1e2d3d;
+    --border-hi:  #2a4060;
+    --accent:     #00d4ff;
+    --accent-dim: #0099bb;
+    --accent-glow:#00d4ff33;
+    --text-hi:    #e8edf3;
+    --text-mid:   #8899aa;
+    --text-lo:    #445566;
+    --ok:         #00e5a0;
+    --warn:       #ffaa00;
+    --danger:     #ff4455;
+    --mono:       'JetBrains Mono', monospace;
+    --sans:       'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg-void);
+    color: var(--text-hi);
+    font-family: var(--mono);
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* 背景网格 */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 48px 48px;
+    opacity: 0.35;
+    pointer-events: none;
+  }
+
+  /* 光晕 */
+  body::after {
+    content: '';
+    position: fixed;
+    width: 600px; height: 600px;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -60%);
+    background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+    pointer-events: none;
+    animation: pulse 4s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.6; transform: translate(-50%, -60%) scale(1); }
+    50%       { opacity: 1;   transform: translate(-50%, -60%) scale(1.08); }
+  }
+
+  .login-wrap {
+    position: relative; z-index: 10;
+    width: 420px;
+    animation: fadeUp 0.5s ease both;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* 顶部品牌区 */
+  .brand {
+    margin-bottom: 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .brand-tag {
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    color: var(--accent);
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .brand-tag::before {
+    content: '';
+    display: inline-block;
+    width: 24px; height: 1px;
+    background: var(--accent);
+  }
+
+  .brand-title {
+    font-family: var(--sans);
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--text-hi);
+    line-height: 1;
+  }
+
+  .brand-sub {
+    font-size: 11px;
+    color: var(--text-lo);
+    letter-spacing: 0.05em;
+  }
+
+  /* 卡片 */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 32px;
+    position: relative;
+  }
+
+  /* 角标装饰 */
+  .card::before, .card::after {
+    content: '';
+    position: absolute;
+    width: 8px; height: 8px;
+    border-color: var(--accent);
+    border-style: solid;
+  }
+  .card::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+  .card::after  { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; }
+
+  .section-label {
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    color: var(--text-lo);
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .section-label .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 8px var(--ok);
+    animation: blink 2s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  .field { margin-bottom: 20px; }
+
+  .field label {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--text-mid);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .field input {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 11px 14px;
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--text-hi);
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+
+  .field input:focus {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+
+  .field input::placeholder { color: var(--text-lo); }
+
+  .error-msg {
+    background: #ff445515;
+    border: 1px solid #ff445540;
+    border-left: 3px solid var(--danger);
+    border-radius: 3px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--danger);
+    margin-bottom: 20px;
+  }
+
+  .btn-login {
+    width: 100%;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 3px;
+    padding: 13px;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 0.15s, box-shadow 0.15s, transform 0.1s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn-login:hover {
+    background: #33ddff;
+    box-shadow: 0 0 24px var(--accent-glow);
+  }
+
+  .btn-login:active { transform: scale(0.98); }
+
+  /* 底部信息 */
+  .footer-info {
+    margin-top: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10px;
+    color: var(--text-lo);
+    letter-spacing: 0.05em;
+  }
+
+  .footer-info span { color: var(--text-lo); }
+  .version { color: var(--accent-dim); }
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <div class="brand">
+    <div class="brand-tag">Docker Cluster Manager</div>
+    <div class="brand-title">DockerHub<br>Manager</div>
+    <div class="brand-sub">多用户 Docker 环境分配与管理系统</div>
+  </div>
+
+  <div class="card">
+    <div class="section-label">
+      <span>AUTH / 身份验证</span>
+      <span class="dot"></span>
+    </div>
+
+    {% if error %}
+    <div class="error-msg">⚠ {{ error }}</div>
+    {% endif %}
+
+    <form method="POST" action="/login">
+      <div class="field">
+        <label>用户名 Username</label>
+        <input type="text" name="username" placeholder="admin" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label>密码 Password</label>
+        <input type="password" name="password" placeholder="••••••••" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn-login">→ 进入系统</button>
+    </form>
+  </div>
+
+  <div class="footer-info">
+    <span>DockerHub Manager</span>
+    <span class="version">v0.1.0-dev</span>
+  </div>
+</div>
+</body>
+</html>
