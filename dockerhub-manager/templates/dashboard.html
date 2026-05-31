@@ -33,7 +33,7 @@
   --text-hi:     #e8edf3;
   --text-mid:    #7a8fa8;
   --text-lo:     #3a4f65;
-  --sidebar-w:   220px;
+  --sidebar-w:   236px;
   --topbar-h:    52px;
   --mono:        'JetBrains Mono', monospace;
   --sans:        'Syne', sans-serif;
@@ -103,21 +103,24 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  min-width: 0;
 }
 
 .brand-name {
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--text-hi);
   letter-spacing: -0.01em;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .brand-version {
   font-size: 10px;
   color: var(--text-lo);
   letter-spacing: 0.05em;
+  white-space: nowrap;
 }
 
 .topbar-status {
@@ -1180,8 +1183,8 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   <div class="topbar-brand">
     <div class="brand-icon">D</div>
     <div class="brand-text">
-      <div class="brand-name">DockerHub Mgr</div>
-      <div class="brand-version">v0.1.0 — DEV</div>
+      <div class="brand-name">DockerHub Manager</div>
+      <div class="brand-version">v{{ panel_version }}</div>
     </div>
   </div>
 

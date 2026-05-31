@@ -36,6 +36,7 @@ DATA_FILE = Path("data.json")
 SSH_PORT_MIN = 32000
 SSH_PORT_MAX = 32999
 DEFAULT_SSH_IMAGE = "lscr.io/linuxserver/openssh-server:latest"
+PANEL_VERSION = "0.4.0"
 
 def load_data():
     with data_lock:
@@ -603,7 +604,11 @@ def login():
                 session["role"] = user["role"]
                 return redirect(url_for("dashboard"))
         error = "用户名或密码错误"
-    return render_template_string(load_template("login.html"), error=error)
+    return render_template_string(
+        load_template("login.html"),
+        error=error,
+        panel_version=PANEL_VERSION,
+    )
 
 @app.route("/logout")
 def logout():
@@ -617,7 +622,8 @@ def dashboard():
     return render_template_string(
         load_template("dashboard.html"),
         user=session["user"],
-        role=session["role"]
+        role=session["role"],
+        panel_version=PANEL_VERSION,
     )
 
 # ── API：服务器管理 ─────────────────────────────────────────────────────────
