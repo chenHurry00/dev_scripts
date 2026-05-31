@@ -149,6 +149,7 @@ def inspect_container_details(name):
     if not raw:
         return None, error
     labels = raw.get("Config", {}).get("Labels") or {}
+    host_config = raw.get("HostConfig", {}) or {}
     ports = []
     for container_port, bindings in (raw.get("NetworkSettings", {}).get("Ports") or {}).items():
         for binding in bindings or []:
@@ -166,6 +167,11 @@ def inspect_container_details(name):
             break
     if not ssh_port and ports:
         ssh_port = ports[0]["host_port"]
+    pids_limit = host_config.get("PidsLimit")
+    try:
+        pids_limit = int(pids_limit)
+    except (TypeError, ValueError):
+        pids_limit = None
     return {
         "id": raw.get("Id", ""),
         "name": (raw.get("Name") or "").lstrip("/"),
@@ -178,6 +184,7 @@ def inspect_container_details(name):
             f"{item['host_ip']}:{item['host_port']}->{item['container_port']}" for item in ports if item.get("host_port")
         ),
         "ssh_port": ssh_port,
+        "pids_limit": pids_limit,
     }, None
 
 def inspect_image_details(image_ref):
@@ -336,6 +343,48 @@ def remove_image_quietly(image_ref):
     if not image_ref:
         return
     run(["docker", "image", "rm", image_ref], timeout=180)
+
+def list_all_container_names():
+    code, out, err = run(["docker", "ps", "-a", "--format", "{{.Names}}"], timeout=30)
+    if code != 0:
+        return None, err or "读取容器列表失败"
+    return [line.strip() for line in out.splitlines() if line.strip()], None
+
+def image_used_by_container_names(image_id):
+    if not image_id:
+        return [], None
+    names, error = list_all_container_names()
+    if names is None:
+        return [], error
+    used_by = []
+    for name in names:
+        raw, inspect_error = inspect_container_raw(name)
+        if not raw:
+            continue
+        if str(raw.get("Image") or "").strip() == str(image_id).strip():
+            used_by.append(name)
+    return used_by, None
+
+def cleanup_temporary_image(image_ref):
+    if not image_ref:
+        return ""
+    image_info, image_error = inspect_image_details(image_ref)
+    if not image_info:
+        return ""
+    labels = image_info.get("labels", {}) or {}
+    if labels.get("manager.backup_kind") != "temporary_rebuild_snapshot":
+        return ""
+    used_by, used_error = image_used_by_container_names(image_info.get("id", ""))
+    if used_error:
+        return f"临时快照镜像状态确认失败：{used_error}"
+    if used_by:
+        preview = ", ".join(used_by[:3])
+        suffix = " 等容器" if len(used_by) > 3 else ""
+        return f"临时快照镜像 {image_ref} 仍被 {preview}{suffix} 使用，当前不能删除"
+    code, out, err = run(["docker", "image", "rm", image_ref], timeout=180)
+    if code != 0:
+        return err or out or f"临时快照镜像 {image_ref} 删除失败"
+    return ""
 
 def resolve_container_image_mode(labels):
     image_mode = str((labels or {}).get("manager.image_mode") or "").strip()
@@ -1653,7 +1702,14 @@ def update_container_resources(name):
 
     cmd.append(name)
     code, out, err = run(cmd)
-    return jsonify({"ok": code == 0, "error": err if code != 0 else None})
+    if code != 0:
+        return jsonify({"ok": False, "error": err if err else out}), 500
+    details, inspect_error = inspect_container_details(name)
+    return jsonify({
+        "ok": True,
+        "error": inspect_error if not details else None,
+        "pids_limit": details.get("pids_limit") if details else None,
+    })
 
 @app.route("/containers/<name>/backup-preview")
 @auth_required
@@ -1730,6 +1786,11 @@ def rebuild_container(name):
     body = request.get_json(silent=True) or {}
     labels = dict((raw.get("Config", {}) or {}).get("Labels") or {})
     host_config = raw.get("HostConfig", {}) or {}
+    current_image_ref = str((raw.get("Config", {}) or {}).get("Image") or "").strip()
+    current_image_info, _ = inspect_image_details(current_image_ref)
+    previous_temp_image_ref = ""
+    if current_image_info and (current_image_info.get("labels", {}) or {}).get("manager.backup_kind") == "temporary_rebuild_snapshot":
+        previous_temp_image_ref = preferred_repo_tag(current_image_info.get("repo_tags", []), current_image_ref) or current_image_ref
     source_type = str(body.get("source_type", "temporary_snapshot") or "temporary_snapshot").strip() or "temporary_snapshot"
     current_image_mode = resolve_container_image_mode(labels)
     allow_sudo = resolve_allow_sudo(labels, host_config)
@@ -1802,7 +1863,8 @@ def rebuild_container(name):
 
     def cleanup_temp_image():
         if temporary_image_ref:
-            remove_image_quietly(temporary_image_ref)
+            return cleanup_temporary_image(temporary_image_ref)
+        return ""
 
     def restore_original_container(error_message):
         rollback_errors = []
@@ -1850,8 +1912,13 @@ def rebuild_container(name):
     code, _, err = run(["docker", "rm", "-f", rollback_name], timeout=180)
     if code != 0:
         cleanup_warning = err or "旧容器清理失败"
-    cleanup_temp_image()
+    previous_temp_image_warning = ""
+    if previous_temp_image_ref and previous_temp_image_ref != temporary_image_ref:
+        previous_temp_image_warning = cleanup_temporary_image(previous_temp_image_ref)
+    temporary_image_warning = cleanup_temp_image()
     details, _ = inspect_container_details(name)
+    if previous_temp_image_warning:
+        cleanup_warning = f"{cleanup_warning}；{previous_temp_image_warning}" if cleanup_warning else previous_temp_image_warning
     return jsonify({
         "ok": True,
         "container_id": new_container_id,
@@ -1870,11 +1937,14 @@ def rebuild_container(name):
         "memory": resource_settings["memory"],
         "pids_limit": resource_settings["pids_limit"],
         "rollback_warning": cleanup_warning,
+        "temporary_image_warning": temporary_image_warning,
     })
 
 @app.route("/containers/<name>/remove", methods=["DELETE"])
 @auth_required
 def remove_container(name):
+    details, _ = inspect_container_details(name)
+    image_ref = details.get("image", "") if details else ""
     _, config_volume, _ = run([
         "docker", "inspect", name,
         "--format", "{{index .Config.Labels \"manager.config_volume\"}}"
@@ -1886,16 +1956,22 @@ def remove_container(name):
     run(f"docker stop {name}")
     code, out, err = run(f"docker rm -f {name}")
     volume_error = None
+    image_warning = None
     if code == 0 and config_volume:
         volume_code, _, volume_err = run(["docker", "volume", "rm", config_volume], timeout=30)
         if volume_code != 0:
             volume_error = volume_err
     if code == 0 and password_file:
         cleanup_secret_path(password_file)
+    if code == 0 and image_ref:
+        temp_warning = cleanup_temporary_image(image_ref)
+        if temp_warning:
+            image_warning = temp_warning
     return jsonify({
         "ok": code == 0,
         "error": err if code != 0 else None,
         "volume_warning": volume_error,
+        "image_warning": image_warning,
     })
 
 @app.route("/containers/<name>/logs")

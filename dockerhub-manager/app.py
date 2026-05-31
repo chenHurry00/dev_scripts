@@ -305,6 +305,7 @@ def normalize_agent_container(raw):
         "image": raw.get("image") or raw.get("Image") or "",
         "status": status,
         "created_at": raw.get("created_at") or raw.get("CreatedAt") or "",
+        "pids_limit": raw.get("pids_limit"),
         "labels": labels if isinstance(labels, dict) else {},
         "ports": raw.get("ports") or [],
         "ports_text": raw.get("ports_text") or raw.get("Ports") or "",
@@ -421,6 +422,7 @@ def reconcile_containers(data):
                 ssh_port=agent_container.get("ssh_port"),
                 agent_container_id=agent_container.get("container_id", ""),
                 status=agent_container.get("status", "unknown"),
+                pids_limit=agent_container.get("pids_limit") or labels.get("manager.pids_limit", 512),
                 gpu_enabled=parse_label_bool(labels.get("manager.gpu_enabled")),
                 gpu_driver=labels.get("manager.gpu_driver", ""),
                 gpu_devices=parse_label_list(labels.get("manager.gpu_devices", "")),
@@ -464,7 +466,7 @@ def adopt_agent_container(data, server_id, server, name, defaults):
             mounts=defaults.get("mounts"),
             cpu_limit=defaults.get("cpu_limit", ""),
             mem_limit=defaults.get("mem_limit", ""),
-            pids_limit=defaults.get("pids_limit", 512),
+            pids_limit=agent_container.get("pids_limit") or defaults.get("pids_limit", 512),
             gpu_enabled=parse_label_bool(agent_container.get("labels", {}).get("manager.gpu_enabled")),
             gpu_driver=agent_container.get("labels", {}).get("manager.gpu_driver", defaults.get("gpu_driver", "")),
             gpu_devices=parse_label_list(agent_container.get("labels", {}).get("manager.gpu_devices", "")) or defaults.get("gpu_devices", []),
@@ -1062,6 +1064,7 @@ def api_create_container():
 @login_required
 @role_required("admin", "allocator")
 def api_del_container(cid):
+    agent_warnings = {}
     with data_lock:
         data = load_data()
         container = data["containers"].get(cid)
@@ -1076,12 +1079,16 @@ def api_del_container(cid):
             )
             if not result.get("ok") and not not_found:
                 return jsonify({"error": result.get("error", "Agent 删除容器失败")}), 500
+            agent_warnings = {
+                "volume_warning": result.get("volume_warning"),
+                "image_warning": result.get("image_warning"),
+            }
     with data_lock:
         data = load_data()
         container = data["containers"].pop(cid, None)
         append_audit(data, f"删除容器 {container.get('name', cid) if container else cid}", "WARN")
         save_data(data)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, **agent_warnings})
 
 @app.route("/api/containers/<cid>/resources", methods=["PATCH"])
 @login_required
@@ -1119,10 +1126,10 @@ def api_update_container_resources(cid):
             return jsonify({"error": "容器不存在"}), 404
         container["cpu_limit"] = payload["cpu"]
         container["mem_limit"] = payload["memory"]
-        container["pids_limit"] = payload["pids_limit"]
+        container["pids_limit"] = result.get("pids_limit", payload["pids_limit"])
         append_audit(data, f"更新容器资源 {container.get('name', cid)}")
         save_data(data)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "pids_limit": result.get("pids_limit", payload["pids_limit"])})
 
 @app.route("/api/containers/<cid>/backup-preview", methods=["GET"])
 @login_required

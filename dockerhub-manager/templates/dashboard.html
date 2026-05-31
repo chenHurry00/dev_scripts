@@ -1746,7 +1746,11 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <span class="resource-card-value" id="edit-ctr-resource-current-mem">—</span>
           </div>
           <div class="resource-card-item">
-            <span class="resource-card-label">当前 PIDs</span>
+            <span class="resource-card-label">当前进程数</span>
+            <span class="resource-card-value" id="edit-ctr-resource-current-pids-usage">—</span>
+          </div>
+          <div class="resource-card-item">
+            <span class="resource-card-label">当前 PIDs 上限</span>
             <span class="resource-card-value" id="edit-ctr-resource-current-pids">—</span>
           </div>
           <div class="resource-card-item">
@@ -1780,7 +1784,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
         <div class="form-field">
           <label class="form-label">PIDs 限制</label>
           <input class="form-input" type="number" id="edit-ctr-resource-pids" placeholder="512" min="1">
-          <div class="form-hint">这里只会修改 CPU / 内存 / PIDs，不处理 GPU 与磁盘上限。</div>
+          <div class="form-hint">这里只会修改 CPU / 内存 / PIDs，不处理 GPU 与磁盘上限。PIDs 上限只限制后续新建进程，不会主动终止容器内已存在进程。</div>
         </div>
         <div class="modal-inline-actions">
           <button class="btn btn-primary" id="edit-ctr-resource-submit" onclick="saveContainerResources()">保存在线修改</button>
@@ -2416,9 +2420,13 @@ function renderContainerMetrics(container) {
     ? `${formatBytesCompact(metric.memory_used_bytes)} / ${formatBytesCompact(metric.memory_limit_bytes)}`
     : formatBytesCompact(metric.memory_used_bytes);
   const gpuHtml = renderContainerGpuMetrics(container, metric);
+  const pidsText = metric.pids_current !== undefined && metric.pids_current !== null
+    ? `${metric.pids_current} / ${container.pids_limit || '—'}`
+    : `— / ${container.pids_limit || '—'}`;
   return `<div class="runtime-metrics">
     <div>CPU ${formatPercent(metric.cpu_percent)}</div>
     <div>MEM ${memoryText}</div>
+    <div>PIDS ${escapeHtml(String(pidsText))}</div>
     <div>DISK ${formatBytesCompact(metric.disk_rw_bytes)}</div>
     ${gpuHtml}
   </div>`;
@@ -3046,6 +3054,7 @@ async function loadContainerBackupPreview(container) {
 
 async function openContainerResourceModal(id) {
   const container = STATE.containers.find(item => item.id === id);
+  const metric = STATE.containerMetrics[id];
   if (!container) {
     toast('未找到容器信息，请先刷新列表', 'danger');
     return;
@@ -3059,6 +3068,8 @@ async function openContainerResourceModal(id) {
   ].join(' / ');
   document.getElementById('edit-ctr-resource-current-cpu').textContent = container.cpu_limit || '1';
   document.getElementById('edit-ctr-resource-current-mem').textContent = container.mem_limit || '1g';
+  document.getElementById('edit-ctr-resource-current-pids-usage').textContent =
+    metric && metric.pids_current !== undefined && metric.pids_current !== null ? String(metric.pids_current) : '采集中...';
   document.getElementById('edit-ctr-resource-current-pids').textContent = String(container.pids_limit || 512);
   document.getElementById('edit-ctr-resource-current-gpu').textContent = container.gpu_enabled
     ? (normalizeGpuDeviceIds(container.gpu_devices || []).join(',') || '已启用')
@@ -3231,9 +3242,19 @@ async function rebuildContainer() {
   submitBtn.textContent = '重建并应用变更';
   if (res.ok) {
     closeModal('modal-edit-ctr-resource');
-    toast(res.rollback_warning ? `容器已重建，但旧容器清理失败：${res.rollback_warning}` : '容器重建完成', res.rollback_warning ? 'warn' : 'ok');
+    if (res.rollback_warning) {
+      toast(`容器已重建，但旧容器清理失败：${res.rollback_warning}`, 'warn');
+    } else {
+      toast('容器重建完成', 'ok');
+    }
+    if (res.temporary_image_warning) {
+      toast(res.temporary_image_warning, 'warn');
+    }
     loadContainers();
     loadOverview();
+    if (document.getElementById('img-server').value === container.server) {
+      loadImages();
+    }
     loadAuditLogs();
   } else {
     toast(res.error || '容器重建失败', 'danger');
@@ -3243,7 +3264,19 @@ async function rebuildContainer() {
 async function delContainer(id) {
   if (!confirm('确认删除该容器？')) return;
   const res = await api(`/api/containers/${id}`, { method: 'DELETE' });
-  if (res.ok) { toast('容器已删除', 'warn'); loadContainers(); loadOverview(); loadAuditLogs(); }
+  if (res.ok) {
+    toast('容器已删除', 'warn');
+    if (res.volume_warning) {
+      toast(`配置卷清理提示：${res.volume_warning}`, 'warn');
+    }
+    if (res.image_warning) {
+      toast(res.image_warning, 'warn');
+    }
+    loadContainers();
+    loadOverview();
+    loadImages();
+    loadAuditLogs();
+  }
 }
 
 function openAddServerModal() {
