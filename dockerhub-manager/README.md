@@ -26,6 +26,8 @@ SSH 公钥登录：通过
 
 当前中心面板使用 `data.json` 保存配置，适合小规模受控部署。面板可以供多个管理员共享使用，但不要直接将 Flask 服务裸露到公网。需要公网访问时，应在前方配置 HTTPS 反向代理、来源限制和独立认证策略。
 
+平台用户密码以哈希形式保存在 `data.json`。旧版本遗留的明文密码会在对应用户首次成功登录后自动迁移为哈希。
+
 ## 架构
 
 ```text
@@ -57,18 +59,77 @@ Agent 独立运行。中心面板故障时，已有容器仍继续运行；新�
 ssh ubuntu@192.168.1.20
 ```
 
-在中心服务器上准备项目代码。可以使用内部 Git 仓库拉取，也可以将当前目录上传到服务器。进入实际项目目录后启动：
+在中心服务器上准备项目代码。可以使用内部 Git 仓库拉取，也可以将当前目录上传到服务器。进入实际项目目录后运行管理脚本：
 
 ```bash
-cd /opt/dockerhub-manager
-pip3 install -r requirements.txt
-export SECRET_KEY="$(openssl rand -hex 32)"
-export ADMIN_PASSWORD="$(openssl rand -base64 24)"
-echo "首次登录账号：admin / ${ADMIN_PASSWORD}"
-PANEL_PORT=5000 python3 app.py
+cd dockerhub-manager
+bash scripts/panel_manager.sh
 ```
 
-首次验证可以直接以前台方式运行。需要长期运行时，应使用 systemd 或现有运维平台托管该命令，并持久化保存同一个 `SECRET_KEY` 和 `ADMIN_PASSWORD`，不要在每次重启时重新生成。
+选择：
+
+```text
+1. 安装/更新中心面板
+```
+
+脚本会：
+
+```text
+将面板安装到隐藏目录 /opt/.dockerhub-panel
+创建独立 Python 虚拟环境
+生成并保存 SECRET_KEY
+提示输入并确认 admin 管理员密码
+注册 dockerhub-panel.service
+使用单进程、少线程 Gunicorn 运行面板
+设置开机自启并启动服务
+询问是否同时部署本机 Docker 管理 Agent
+```
+
+再次运行同一个脚本，可以更新、重启面板、查看状态、查看日志或停止面板。更新面板时会覆盖程序文件，但保留 `/opt/.dockerhub-panel/data.json`。检测到已有 `/etc/dockerhub-manager/panel.env` 时，脚本会先询问：
+
+```text
+Existing panel configuration detected. Modify it? [y/N]:
+```
+
+直接回车或输入 `N` 会保留现有端口、`SECRET_KEY` 和初始化配置，不再要求重新输入。只有输入 `Y` 或 `Yes` 才会进入配置修改。
+
+如果 Ubuntu 缺少 `python3-venv` 或对应版本的 `python3.x-venv`，管理脚本会自动补装系统依赖，并重建上一次失败遗留的不完整虚拟环境。安装依赖后直接重新运行同一个管理脚本即可。
+
+也可以直接使用命令模式：
+
+```bash
+bash scripts/panel_manager.sh update
+bash scripts/panel_manager.sh restart
+bash scripts/panel_manager.sh status
+bash scripts/panel_manager.sh logs
+bash scripts/panel_manager.sh uninstall
+bash scripts/panel_manager.sh install-local-agent
+bash scripts/panel_manager.sh agent-status
+bash scripts/panel_manager.sh agent-logs
+bash scripts/panel_manager.sh uninstall-local-agent
+```
+
+### 卸载中心面板
+
+在菜单中选择：
+
+```text
+6. 卸载中心面板
+```
+
+或直接执行：
+
+```bash
+bash scripts/panel_manager.sh uninstall
+```
+
+卸载前脚本会要求输入 `Y` 或 `Yes` 明确确认，并询问是否备份 `data.json` 和面板配置。建议保留默认选项 `Y`。备份文件会写入：
+
+```text
+/var/backups/dockerhub-manager/panel-backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+备份权限为 `600`，其中可能包含 Agent Token 和面板密钥。卸载面板会删除 `dockerhub-panel.service`、`/opt/.dockerhub-panel` 和面板配置，但不会删除已有 Docker 容器、Docker volume 或宿主机挂载数据。脚本会另行询问是否同时卸载本机 Agent。
 
 在中心服务器的 1Panel、系统防火墙或云安全组中放行：
 
@@ -93,13 +154,13 @@ http://192.168.1.20:5000
 admin / admin123
 ```
 
-正式部署不要使用默认密码。当前页面尚未提供密码修改入口，应在首次启动前设置 `ADMIN_PASSWORD`。如果已经生成 `data.json`，其中的密码配置优先，环境变量不会覆盖已有配置。
+管理脚本会在首次安装时提示输入并二次确认 `admin` 管理员密码，密码至少需要 8 位。当前页面尚未提供密码修改入口；如果已经生成 `data.json`，其中的密码配置优先，更新面板会保留已有密码。
 
 正式部署前检查：
 
 ```text
-首次启动前设置随机 ADMIN_PASSWORD
-设置随机 SECRET_KEY
+首次安装时设置并妥善记录 admin 管理员密码
+确认 SECRET_KEY 已保存在 /etc/dockerhub-manager/panel.env
 为每台服务器设置独立 Agent Token
 在 1Panel、系统防火墙或云安全组中限制 Agent 端口来源
 按需放行容器 SSH 端口 TCP 32000-32999
@@ -138,6 +199,14 @@ TCP 32000-32999：按实际使用者来源网段放行，用于容器 SSH
 /opt/.dockerhub-agent
 ```
 
+其中包含独立卸载脚本。需要在某台远程服务器上卸载 Agent 时，SSH 登录该服务器后执行：
+
+```bash
+sudo bash /opt/.dockerhub-agent/uninstall.sh
+```
+
+卸载脚本会要求输入 `Y` 或 `Yes` 明确确认。它只停止并删除 `dockerhub-agent.service` 和 Agent 程序文件，不会删除 Docker daemon、已有容器、Docker volume 或宿主机挂载数据。即使中心面板不可用，远程服务器仍可以独立卸载 Agent。
+
 systemd 服务：
 
 ```bash
@@ -165,6 +234,54 @@ deploy.sh 只部署 /opt/.dockerhub-agent 和 dockerhub-agent systemd 服务
 ```
 
 如果远程服务器没有 Docker，脚本会直接失败并提示人工处理。这样避免破坏已有 NVIDIA Docker、Docker CE、自定义 registry、daemon.json、运行中容器等原始环境。
+
+## 管理中心服务器本机 Docker
+
+中心面板服务器本身也可以作为 Docker 节点。安装中心面板时，如果脚本检测到本机 Docker，会询问：
+
+```text
+检测到本机 Docker，是否同时部署本机 Docker 管理 Agent？
+```
+
+选择 `y` 后，脚本会安装并启动本机 `dockerhub-agent.service`。也可以稍后再次运行：
+
+```bash
+bash scripts/panel_manager.sh
+```
+
+选择：
+
+```text
+7. 安装/更新本机 Agent
+```
+
+更新已存在的本机 Agent 时，脚本也会先询问：
+
+```text
+Existing local Agent configuration detected. Modify it? [y/N]:
+```
+
+默认保留现有 Agent 端口和 Token。
+
+然后在中心面板的“服务器”页面添加本机节点：
+
+```text
+主机 IP / 域名：127.0.0.1
+SSH 显示地址：中心服务器局域网 IP
+Agent 端口：脚本输出的端口，默认 5001
+Agent Token：脚本输出的 Token
+挂载根目录：按本机数据盘实际路径填写
+```
+
+面板通过 `127.0.0.1` 访问本机 Agent，因此无需为本机 Agent API 对外放行 `5001`。如需让其他机器 SSH 登录本机创建的容器，仍需在中心服务器上按可信来源放行 `TCP 32000-32999`。
+
+卸载本机 Agent 时，选择菜单中的 `11. 卸载本机 Agent` 或执行：
+
+```bash
+bash scripts/panel_manager.sh uninstall-local-agent
+```
+
+该操作仅停止并删除本机 Agent 服务和程序文件，不会删除 Docker daemon、已有容器、Docker volume 或宿主机挂载数据。
 
 ## 一键验证远程服务器
 
@@ -311,12 +428,14 @@ bash scripts/smoke_remote.sh \
 
 ```text
 名称：GPU-01
-服务器 ID：srv_gpu01
+服务器 ID：srv_gpu01，可留空自动生成
 主机 IP / 域名：192.168.1.10
 SSH 显示地址：192.168.1.10
 Agent 端口：5001
 Agent Token：部署 Agent 时使用的 Token
 ```
+
+服务器 ID 仅支持字母、数字、下划线和连字符。旧版本如果曾保存空 ID，更新面板后会在首次读取时自动迁移为基于服务器名称生成的 ID，并同步更新已有容器引用。
 
 挂载根目录每行一个：
 
@@ -351,6 +470,24 @@ SSH 端口
 挂载目录
 ```
 
+### SSH 登录方式
+
+默认推荐使用 SSH 公钥。让容器使用者在自己的电脑执行：
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+如果文件不存在，先生成：
+
+```bash
+ssh-keygen -t ed25519
+```
+
+将输出的一整行公钥粘贴到“SSH 公钥”。也可以在分配容器时勾选“启用 SSH 密码登录”并输入至少 8 位密码。密码登录仅支持默认的 `lscr.io/linuxserver/openssh-server:latest` 镜像，不建议用于公网环境。
+
+SSH 密码不会写入中心面板的 `data.json`，也不会作为 Docker 环境变量保存。Agent 会将其写入隐藏目录中的 `600` 权限文件，并以只读文件挂载提供给容器；删除容器时同步删除密码文件。
+
 资源默认值来自 Agent 上报的真实资源：
 
 ```text
@@ -360,7 +497,9 @@ SSH 端口
 
 前端可修改，Agent 仍会校验格式和合法性。
 
-挂载目录每行一个：
+分配容器时，页面会显示目标服务器已经注册的挂载根目录。可以直接勾选，并调整该容器使用的宿主机子目录、容器内路径和只读模式。
+
+也可以在“手动追加挂载目录”中每行填写一个：
 
 ```text
 /mnt/data/users/alice|/workspace|rw
@@ -372,6 +511,8 @@ SSH 端口
 ```text
 宿主机路径|容器内路径|ro/rw
 ```
+
+手动填写的宿主机路径仍必须位于服务器已注册根目录下。如果需要使用新的磁盘路径，先在“服务器”页面编辑节点并追加挂载根目录，再分配容器。
 
 SSH 登录命令生成示例：
 
@@ -439,6 +580,23 @@ Agent 工作目录是否隐藏
 CPU / 内存信息
 ```
 
+## 服务器编辑与操作日志
+
+服务器列表提供“编辑”按钮，可以修改：
+
+```text
+名称
+主机 IP / 域名
+SSH 显示地址
+Agent 端口
+Agent Token
+挂载根目录
+```
+
+编辑时 Agent Token 留空表示保留现有 Token。
+
+概览和“操作日志”页面显示真实审计记录，不再生成循环演示日志。当前记录服务器注册、编辑和移除，以及容器创建、删除、资源更新和平台用户变更。最多保留最近 `200` 条记录。
+
 ## 配置导入导出
 
 中心面板提供配置灾备接口：
@@ -472,9 +630,10 @@ chmod 600 config-backup.json
 ```bash
 git clone <repo> dockerhub-manager
 cd dockerhub-manager
-pip3 install -r requirements.txt
-python3 app.py
+bash scripts/panel_manager.sh
 ```
+
+选择 `1. 安装/更新中心面板`，再导入包含 Token 的灾备配置。
 
 导入包含 Token 的配置后，只要这些条件成立，就能重新接管：
 
@@ -491,7 +650,8 @@ Agent Token 未改变
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `SECRET_KEY` | Flask session 密钥 | `change-me-in-production-please` |
-| `ADMIN_PASSWORD` | 首次生成 `data.json` 前使用的管理员密码 | `admin123` |
+| `ADMIN_PASSWORD` | 手工启动时，首次生成 `data.json` 前使用的管理员密码 | `admin123` |
+| `ADMIN_PASSWORD_B64` | 管理脚本使用的 Base64 初始管理员密码，优先于 `ADMIN_PASSWORD` | 空 |
 | `PANEL_PORT` | 中心面板监听端口 | `5000` |
 | `DEBUG` | Flask 调试模式，仅开发时设置为 `1` | `0` |
 
@@ -510,6 +670,7 @@ dockerhub-manager/
 ├── requirements.txt
 ├── deploy.sh
 ├── scripts/
+│   ├── panel_manager.sh
 │   ├── check_agent.sh
 │   └── smoke_remote.sh
 ├── data.json
@@ -517,7 +678,8 @@ dockerhub-manager/
 │   ├── login.html
 │   └── dashboard.html
 ├── agent/
-│   └── agent.py
+│   ├── agent.py
+│   └── uninstall.sh
 └── docs/
     ├── Ubuntu多用户Docker环境隔离管理系统.md
     └── 中心管理面板与多服务器Agent更新计划.md

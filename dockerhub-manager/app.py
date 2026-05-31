@@ -1,20 +1,27 @@
 import base64
+import hmac
 import json
 import os
 import posixpath
+import re
 import shlex
 import subprocess
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
 import requests
-from flask import Flask, Response, jsonify, render_template_string, request, session, redirect, url_for
+from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production-please")
-admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+admin_password_b64 = os.environ.get("ADMIN_PASSWORD_B64", "")
+admin_password = (
+    base64.b64decode(admin_password_b64).decode("utf-8")
+    if admin_password_b64
+    else os.environ.get("ADMIN_PASSWORD", "admin123")
+)
 agent_http = requests.Session()
 agent_http.trust_env = False
 
@@ -30,20 +37,61 @@ def load_data():
     else:
         data = {
         "users": {
-            "admin": {"password": admin_password, "role": "admin", "created_at": datetime.now().isoformat()}
+            "admin": {"password": generate_password_hash(admin_password), "role": "admin", "created_at": datetime.now().isoformat()}
         },
         "servers": {},
         "containers": {},
-        "templates": []
+        "templates": [],
+        "audit_logs": []
     }
     data.setdefault("users", {})
     data.setdefault("servers", {})
     data.setdefault("containers", {})
     data.setdefault("templates", [])
+    data.setdefault("audit_logs", [])
+    migrate_empty_server_id(data)
     return data
 
 def save_data(data):
     DATA_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+def migrate_empty_server_id(data):
+    """迁移旧版允许保存的空服务器 ID，避免前端下拉框与未选择状态冲突。"""
+    if "" not in data["servers"]:
+        return
+    server = data["servers"].pop("")
+    base = re.sub(r"[^a-zA-Z0-9_-]", "_", server.get("name", "").strip()).strip("_-").lower()
+    base = f"srv_{base or 'migrated'}"
+    sid = base
+    suffix = 2
+    while sid in data["servers"]:
+        sid = f"{base}_{suffix}"
+        suffix += 1
+    data["servers"][sid] = server
+    for container in data["containers"].values():
+        if container.get("server_id", "") == "":
+            container["server_id"] = sid
+    data["audit_logs"].append({
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "level": "WARN",
+        "message": f"自动迁移空服务器 ID 为 {sid}",
+    })
+    data["audit_logs"] = data["audit_logs"][-200:]
+    save_data(data)
+
+def append_audit(data, message, level="INFO"):
+    data.setdefault("audit_logs", []).append({
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "level": level,
+        "message": message,
+    })
+    data["audit_logs"] = data["audit_logs"][-200:]
+
+def verify_password(stored_password, input_password):
+    """兼容旧版明文密码，并在成功登录后迁移为哈希。"""
+    if stored_password.startswith(("scrypt:", "pbkdf2:")):
+        return check_password_hash(stored_password, input_password), False
+    return hmac.compare_digest(stored_password, input_password), True
 
 def call_agent(server: dict, path: str, method="GET", body=None, timeout=20):
     """向指定服务器 Agent 发 HTTP 请求。"""
@@ -159,10 +207,15 @@ def login():
         username = request.form.get("username", "")
         password = request.form.get("password", "")
         user = data["users"].get(username)
-        if user and user["password"] == password:
-            session["user"] = username
-            session["role"] = user["role"]
-            return redirect(url_for("dashboard"))
+        if user:
+            matched, needs_upgrade = verify_password(user["password"], password)
+            if matched:
+                if needs_upgrade:
+                    user["password"] = generate_password_hash(password)
+                    save_data(data)
+                session["user"] = username
+                session["role"] = user["role"]
+                return redirect(url_for("dashboard"))
         error = "用户名或密码错误"
     return render_template_string(load_template("login.html"), error=error)
 
@@ -211,7 +264,11 @@ def api_servers():
 def api_add_server():
     data = load_data()
     body = request.json or {}
-    sid = body.get("id", f"srv_{int(time.time())}")
+    sid = (body.get("id") or "").strip() or f"srv_{int(time.time())}"
+    if not re.match(r"^[a-zA-Z0-9_-]+$", sid):
+        return jsonify({"error": "服务器 ID 只能包含字母、数字、下划线和连字符"}), 400
+    if sid in data["servers"]:
+        return jsonify({"error": "服务器 ID 已存在"}), 400
     mount_roots = normalize_mount_roots(body.get("mount_roots", []))
     data["servers"][sid] = {
         "name": body.get("name", sid),
@@ -223,8 +280,30 @@ def api_add_server():
         "mount_roots": mount_roots,
         "added_at": datetime.now().isoformat()
     }
+    append_audit(data, f"注册服务器 {sid}")
     save_data(data)
     return jsonify({"ok": True, "id": sid})
+
+@app.route("/api/servers/<sid>", methods=["PATCH"])
+@login_required
+@role_required("admin")
+def api_update_server(sid):
+    data = load_data()
+    server = data["servers"].get(sid)
+    if not server:
+        return jsonify({"error": "服务器不存在"}), 404
+    body = request.json or {}
+    server["name"] = body.get("name", server.get("name", sid))
+    server["host"] = body.get("host", server.get("host", ""))
+    server["ssh_host"] = body.get("ssh_host") or server["host"]
+    server["agent_port"] = body.get("agent_port", server.get("agent_port", 5001))
+    if body.get("agent_token"):
+        server["agent_token"] = body["agent_token"]
+    if "mount_roots" in body:
+        server["mount_roots"] = normalize_mount_roots(body["mount_roots"])
+    append_audit(data, f"更新服务器 {sid}")
+    save_data(data)
+    return jsonify({"ok": True})
 
 @app.route("/api/servers/<sid>/defaults", methods=["GET"])
 @login_required
@@ -247,6 +326,7 @@ def api_server_defaults(sid):
 def api_del_server(sid):
     data = load_data()
     data["servers"].pop(sid, None)
+    append_audit(data, f"移除服务器 {sid}", "WARN")
     save_data(data)
     return jsonify({"ok": True})
 
@@ -302,7 +382,7 @@ def api_create_container():
         cpu_limit = cpu_limit or default_cpu
         mem_limit = mem_limit or default_mem
 
-    mounts = body.get("mounts") or build_default_mounts(server, assigned_to, name)
+    mounts = body["mounts"] if "mounts" in body else build_default_mounts(server, assigned_to, name)
     agent_body = {
         "name": name,
         "image": body.get("image", DEFAULT_SSH_IMAGE),
@@ -312,6 +392,8 @@ def api_create_container():
         "pids_limit": body.get("pids_limit", 512),
         "login_user": login_user,
         "ssh_public_key": body.get("ssh_public_key", ""),
+        "password_access": bool(body.get("password_access", False)),
+        "ssh_password": body.get("ssh_password", ""),
         "allow_sudo": bool(body.get("allow_sudo", False)),
         "mounts": mounts,
         "allowed_mount_roots": server.get("mount_roots", []),
@@ -338,6 +420,7 @@ def api_create_container():
         "created_at": datetime.now().isoformat(),
         "created_by": session["user"]
     }
+    append_audit(data, f"创建容器 {name}，服务器 {server_id}")
     save_data(data)
     return jsonify({"ok": True, "id": cid, "ssh_cmd": ssh_cmd})
 
@@ -354,6 +437,7 @@ def api_del_container(cid):
             if not result.get("ok"):
                 return jsonify({"error": result.get("error", "Agent 删除容器失败")}), 500
     data["containers"].pop(cid, None)
+    append_audit(data, f"删除容器 {container.get('name', cid) if container else cid}", "WARN")
     save_data(data)
     return jsonify({"ok": True})
 
@@ -388,6 +472,7 @@ def api_update_container_resources(cid):
     container["cpu_limit"] = payload["cpu"]
     container["mem_limit"] = payload["memory"]
     container["pids_limit"] = payload["pids_limit"]
+    append_audit(data, f"更新容器资源 {container.get('name', cid)}")
     save_data(data)
     return jsonify({"ok": True})
 
@@ -408,13 +493,20 @@ def api_add_user():
     data = load_data()
     body = request.json or {}
     uname = body.get("username", "")
+    password = body.get("password", "")
+    role = body.get("role", "allocator")
     if not uname or uname in data["users"]:
         return jsonify({"error": "用户名无效或已存在"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "密码至少需要 8 位"}), 400
+    if role not in ("admin", "allocator"):
+        return jsonify({"error": "角色无效"}), 400
     data["users"][uname] = {
-        "password": body.get("password", "changeme"),
-        "role": body.get("role", "allocator"),
+        "password": generate_password_hash(password),
+        "role": role,
         "created_at": datetime.now().isoformat()
     }
+    append_audit(data, f"添加平台用户 {uname}")
     save_data(data)
     return jsonify({"ok": True})
 
@@ -426,26 +518,16 @@ def api_del_user(uname):
     if uname == "admin":
         return jsonify({"error": "不能删除 admin"}), 400
     data["users"].pop(uname, None)
+    append_audit(data, f"删除平台用户 {uname}", "WARN")
     save_data(data)
     return jsonify({"ok": True})
 
-# ── SSE：日志流 ────────────────────────────────────────────────────────────
-@app.route("/api/stream/logs")
+# ── 审计日志 ───────────────────────────────────────────────────────────────
+@app.route("/api/logs")
 @login_required
-def stream_logs():
-    def generate():
-        sample = [
-            "[INFO] 系统初始化完成",
-            "[INFO] 服务器连接正常",
-            "[OK] Docker 守护进程运行中",
-            "[INFO] 等待操作指令...",
-        ]
-        for line in sample:
-            ts = datetime.now().strftime("%H:%M:%S")
-            yield f"data: {json.dumps({'time': ts, 'msg': line})}\n\n"
-            time.sleep(0.4)
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+def api_logs():
+    data = load_data()
+    return jsonify({"logs": data.get("audit_logs", [])[-200:]})
 
 # ── 当前用户信息 ───────────────────────────────────────────────────────────
 @app.route("/api/me")
@@ -466,6 +548,7 @@ def api_config_export():
         "servers": json.loads(json.dumps(data.get("servers", {}))),
         "containers": data.get("containers", {}),
         "templates": data.get("templates", []),
+        "audit_logs": data.get("audit_logs", []),
         "contains_tokens": include_tokens,
     }
     if not include_tokens:
@@ -481,7 +564,7 @@ def api_config_import():
     if payload.get("version") != 1:
         return jsonify({"error": "不支持的配置版本"}), 400
     data = load_data()
-    for key in ("users", "servers", "containers", "templates"):
+    for key in ("users", "servers", "containers", "templates", "audit_logs"):
         if key in payload:
             data[key] = payload[key]
     save_data(data)

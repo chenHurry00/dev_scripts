@@ -54,7 +54,12 @@ echo ""
 echo "[1/4] 上传 Agent 脚本..."
 ssh "$SSH_TARGET" "sudo mkdir -p '$REMOTE_DIR'"
 scp "agent/agent.py" "$SSH_TARGET:/tmp/dockerhub-agent.py"
-ssh "$SSH_TARGET" "sudo mv /tmp/dockerhub-agent.py '$REMOTE_DIR/agent.py' && sudo chmod 755 '$REMOTE_DIR/agent.py'"
+scp "agent/uninstall.sh" "$SSH_TARGET:/tmp/dockerhub-agent-uninstall.sh"
+ssh "$SSH_TARGET" "
+  sudo mv /tmp/dockerhub-agent.py '$REMOTE_DIR/agent.py' &&
+  sudo mv /tmp/dockerhub-agent-uninstall.sh '$REMOTE_DIR/uninstall.sh' &&
+  sudo chmod 755 '$REMOTE_DIR/agent.py' '$REMOTE_DIR/uninstall.sh'
+"
 
 echo "[2/4] 安装依赖..."
 ssh "$SSH_TARGET" "
@@ -197,3 +202,6 @@ echo "端口检查清单："
 echo "  - TCP ${AGENT_PORT}: 仅允许中心管理服务器访问 Agent API"
 echo "  - TCP 32000-32999: 按实际使用者来源网段放行容器 SSH"
 echo "  - 如使用 1Panel 或云安全组，请在对应界面手动确认规则"
+echo ""
+echo "需要卸载该 Agent 时，在目标服务器执行："
+echo "  sudo bash ${REMOTE_DIR}/uninstall.sh"

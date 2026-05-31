@@ -31,7 +31,7 @@ WORKDIR = Path(__file__).resolve().parent
 SSH_PORT_MIN = 32000
 SSH_PORT_MAX = 32999
 DEFAULT_SSH_IMAGE = "lscr.io/linuxserver/openssh-server:latest"
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.4.0"
 
 # ── Token 鉴权 ───────────────────────────────────────────────────────────────
 def check_token():
@@ -270,6 +270,8 @@ def create_container():
     pgid     = int(body.get("pgid", 1000))
     login_user = safe_name(body.get("login_user"), "dockeruser")
     public_key = (body.get("ssh_public_key") or "").strip()
+    password_access = bool(body.get("password_access", False))
+    ssh_password = body.get("ssh_password", "")
     allow_sudo = bool(body.get("allow_sudo", False))
     mounts   = body.get("mounts", [])
     allowed_roots = body.get("allowed_mount_roots", [])
@@ -290,6 +292,13 @@ def create_container():
         return jsonify({"ok": False, "error": "PIDs 限制无效"}), 400
     if puid <= 0 or pgid <= 0:
         return jsonify({"ok": False, "error": "PUID 和 PGID 必须为正整数"}), 400
+    linuxserver_openssh = is_linuxserver_openssh(image)
+    if password_access and not linuxserver_openssh:
+        return jsonify({"ok": False, "error": "密码登录仅支持默认 LinuxServer OpenSSH 镜像"}), 400
+    if password_access and len(ssh_password) < 8:
+        return jsonify({"ok": False, "error": "SSH 密码至少需要 8 位"}), 400
+    if not public_key and not password_access:
+        return jsonify({"ok": False, "error": "请填写 SSH 公钥，或启用密码登录"}), 400
 
     ok, error, normalized_mounts = validate_mounts(mounts, allowed_roots, puid, pgid)
     if not ok:
@@ -330,7 +339,6 @@ def create_container():
         "/usr/sbin/sshd -D"
     ).format(user=escaped_user, key=escaped_key, sudo_cmd=sudo_cmd)
 
-    linuxserver_openssh = is_linuxserver_openssh(image)
     container_ssh_port = 2222 if linuxserver_openssh else 22
     image_mode = "linuxserver-openssh" if linuxserver_openssh else "generic-bootstrap"
     cmd = [
@@ -360,10 +368,23 @@ def create_container():
             "-e", f"PUBLIC_KEY={public_key}",
             "-e", f"USER_NAME={login_user}",
             "-e", f"SUDO_ACCESS={'true' if allow_sudo else 'false'}",
-            "-e", "PASSWORD_ACCESS=false",
+            "-e", f"PASSWORD_ACCESS={'true' if password_access else 'false'}",
             image,
         ]
+        password_file = None
+        if password_access:
+            secret_dir = WORKDIR / "secrets"
+            secret_dir.mkdir(mode=0o700, exist_ok=True)
+            password_file = secret_dir / f"{safe_name(name)}.password"
+            password_file.write_text(ssh_password, encoding="utf-8")
+            password_file.chmod(0o600)
+            cmd[-1:-1] = [
+                "--label", f"manager.password_file={password_file}",
+                "-v", f"{password_file}:/run/secrets/dockerhub_ssh_password:ro",
+                "-e", "USER_PASSWORD_FILE=/run/secrets/dockerhub_ssh_password",
+            ]
     else:
+        password_file = None
         cmd += [
             image,
             "/bin/bash", "-c",
@@ -372,6 +393,8 @@ def create_container():
 
     code, out, err = run(cmd, timeout=300)
     if code != 0:
+        if password_file:
+            password_file.unlink(missing_ok=True)
         return jsonify({"ok": False, "error": err}), 500
 
     container_id = out
@@ -431,6 +454,10 @@ def remove_container(name):
         "docker", "inspect", name,
         "--format", "{{index .Config.Labels \"manager.config_volume\"}}"
     ], timeout=10)
+    _, password_file, _ = run([
+        "docker", "inspect", name,
+        "--format", "{{index .Config.Labels \"manager.password_file\"}}"
+    ], timeout=10)
     run(f"docker stop {name}")
     code, out, err = run(f"docker rm -f {name}")
     volume_error = None
@@ -438,6 +465,8 @@ def remove_container(name):
         volume_code, _, volume_err = run(["docker", "volume", "rm", config_volume], timeout=30)
         if volume_code != 0:
             volume_error = volume_err
+    if code == 0 and password_file:
+        Path(password_file).unlink(missing_ok=True)
     return jsonify({
         "ok": code == 0,
         "error": err if code != 0 else None,

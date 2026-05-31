@@ -752,6 +752,32 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
   line-height: 1.5;
 }
 
+.check-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.check-row {
+  display: grid;
+  grid-template-columns: 20px minmax(120px, 1fr) minmax(120px, 1fr) 72px;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-mid);
+}
+
+.check-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.check-row .form-input, .check-row .form-select {
+  padding: 7px 8px;
+  font-size: 11px;
+}
+
 /* SSH 命令展示框 */
 .ssh-output {
   background: var(--bg-void);
@@ -980,7 +1006,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
     <div class="sidebar-bottom">
       <div class="sys-stat">
         <div class="sys-stat-row">
-          <span style="color:var(--text-lo)">系统负载</span>
+          <span style="color:var(--text-lo)">在线节点</span>
           <span style="color:var(--text-mid)" id="load-val">—</span>
         </div>
         <div class="stat-bar">
@@ -1001,7 +1027,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
           <div class="page-title">仪表盘</div>
         </div>
         <div class="page-actions">
-          <button class="btn btn-primary" onclick="openModal('modal-create-ctr')">+ 分配容器</button>
+          <button class="btn btn-primary" onclick="openCreateContainerModal()">+ 分配容器</button>
         </div>
       </div>
 
@@ -1027,7 +1053,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
           </div>
           <div class="stat-card c-warn">
             <div class="stat-label">今日操作</div>
-            <div class="stat-value">0</div>
+            <div class="stat-value" id="ov-ops">0</div>
             <div class="stat-sub">创建 / 删除 / 修改</div>
             <div class="stat-icon">≡</div>
           </div>
@@ -1084,7 +1110,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
           <div class="page-title">容器管理</div>
         </div>
         <div class="page-actions">
-          <button class="btn btn-primary" onclick="openModal('modal-create-ctr')">+ 分配容器</button>
+          <button class="btn btn-primary" onclick="openCreateContainerModal()">+ 分配容器</button>
         </div>
       </div>
       <div class="content-area">
@@ -1120,7 +1146,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
           <div class="page-title">服务器管理</div>
         </div>
         <div class="page-actions">
-          <button class="btn btn-primary" onclick="openModal('modal-add-srv')">+ 添加服务器</button>
+          <button class="btn btn-primary" onclick="openAddServerModal()">+ 添加服务器</button>
         </div>
       </div>
       <div class="content-area">
@@ -1259,7 +1285,12 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
       <div class="form-field">
         <label class="form-label">SSH 公钥</label>
         <textarea class="form-textarea" id="ctr-ssh-key" placeholder="ssh-rsa AAAA..."></textarea>
-        <div class="form-hint">默认禁用 root 和密码登录。建议填写使用者公钥，否则容器可能无法 SSH 登录。</div>
+        <div class="form-hint">使用者可在自己的电脑执行 cat ~/.ssh/id_ed25519.pub 获取公钥。默认推荐公钥登录。</div>
+      </div>
+      <div class="form-field">
+        <label class="form-label"><input type="checkbox" id="ctr-password-access" onchange="togglePasswordAccess()"> 启用 SSH 密码登录</label>
+        <input class="form-input" type="password" id="ctr-ssh-password" placeholder="至少 8 位" style="display:none">
+        <div class="form-hint">仅默认 OpenSSH 镜像支持。密码不会保存到面板配置；公网环境不建议启用。</div>
       </div>
       <div class="form-row">
         <div class="form-field">
@@ -1277,9 +1308,15 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
         <div class="form-hint">使用者将通过此端口直连 Docker。约定范围：32000-32999，请确保端口未被占用。</div>
       </div>
       <div class="form-field">
-        <label class="form-label">挂载目录</label>
+        <label class="form-label">已注册挂载目录</label>
+        <div class="check-list" id="ctr-registered-mounts">
+          <div class="form-hint">选择目标服务器后显示可用目录。</div>
+        </div>
+      </div>
+      <div class="form-field">
+        <label class="form-label">手动追加挂载目录</label>
         <textarea class="form-textarea" id="ctr-mounts" placeholder="/mnt/data/users/alice|/workspace|rw"></textarea>
-        <div class="form-hint">每行一个挂载：宿主机路径|容器内路径|ro/rw。留空时使用服务器第一个挂载根目录创建默认工作区。</div>
+        <div class="form-hint">每行一个挂载：宿主机路径|容器内路径|ro/rw。宿主机路径仍必须位于服务器已注册根目录下。</div>
       </div>
       <div id="ssh-result" style="display:none">
         <div class="form-label" style="margin-top:12px">→ 生成的 SSH 登录命令</div>
@@ -1300,7 +1337,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
 <div class="modal-overlay" id="modal-add-srv">
   <div class="modal">
     <div class="modal-head">
-      <div class="modal-title">注册服务器节点</div>
+      <div class="modal-title" id="srv-modal-title">注册服务器节点</div>
       <button class="modal-close" onclick="closeModal('modal-add-srv')">✕</button>
     </div>
     <div class="modal-body">
@@ -1312,6 +1349,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
         <div class="form-field">
           <label class="form-label">服务器标识 ID</label>
           <input class="form-input" type="text" id="srv-id" placeholder="srv_gpu01">
+          <div class="form-hint">可留空自动生成。仅支持字母、数字、下划线和连字符。</div>
         </div>
       </div>
       <div class="form-row">
@@ -1343,7 +1381,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('modal-add-srv')">取消</button>
-      <button class="btn btn-primary" onclick="addServer()">注册服务器</button>
+      <button class="btn btn-primary" id="srv-submit-btn" onclick="saveServer()">注册服务器</button>
     </div>
   </div>
 </div>
@@ -1363,7 +1401,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
         </div>
         <div class="form-field">
           <label class="form-label">初始密码</label>
-          <input class="form-input" type="text" id="usr-pass" placeholder="changeme123">
+          <input class="form-input" type="password" id="usr-pass" placeholder="至少 8 位">
         </div>
       </div>
       <div class="form-field">
@@ -1393,7 +1431,8 @@ const STATE = {
   role: '{{ role }}',
   servers: [],
   containers: [],
-  users: []
+  users: [],
+  editingServerId: null
 };
 
 /* ═══════════════════════════════════════════════
@@ -1437,6 +1476,7 @@ function switchPanel(name) {
   if (name === 'containers') loadContainers();
   if (name === 'servers')    loadServers();
   if (name === 'users')      loadUsers();
+  if (name === 'audit')      loadAuditLogs();
 }
 
 /* ═══════════════════════════════════════════════
@@ -1448,20 +1488,52 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) closeModal(el.id); });
 });
 
-document.getElementById('ctr-server').addEventListener('change', async e => {
-  const sid = e.target.value;
-  if (!sid) return;
-  const data = await api(`/api/servers/${sid}/defaults`);
-  if (!data.ok) return;
-  document.getElementById('ctr-cpu').value = data.cpu;
-  document.getElementById('ctr-mem').value = data.memory;
-  const user = document.getElementById('ctr-user').value || 'user';
-  const root = (data.mount_roots || [])[0];
-  if (root) {
-    document.getElementById('ctr-mounts').placeholder =
-      `${root.host_path}/${user}|${root.default_container_path || '/workspace'}|${root.readonly ? 'ro' : 'rw'}`;
+document.getElementById('ctr-server').addEventListener('change', loadSelectedServerDefaults);
+
+async function openCreateContainerModal() {
+  openModal('modal-create-ctr');
+  const select = document.getElementById('ctr-server');
+  if (!select.value && STATE.servers.length === 1) {
+    select.value = STATE.servers[0].id;
   }
-});
+  await loadSelectedServerDefaults();
+}
+
+async function loadSelectedServerDefaults() {
+  const sid = document.getElementById('ctr-server').value;
+  if (!sid) {
+    document.getElementById('ctr-registered-mounts').innerHTML =
+      '<div class="form-hint">请先选择目标服务器。</div>';
+    return;
+  }
+  const server = STATE.servers.find(item => item.id === sid);
+  const cachedRoots = (server && server.mount_roots) || [];
+  const container = document.getElementById('ctr-registered-mounts');
+  if (cachedRoots.length) {
+    renderRegisteredMounts(cachedRoots);
+  } else {
+    container.innerHTML = '<div class="form-hint">正在读取服务器挂载目录...</div>';
+  }
+  try {
+    const data = await api(`/api/servers/${sid}/defaults`);
+    if (!data.ok) {
+      throw new Error(data.error || '服务器默认配置读取失败');
+    }
+    document.getElementById('ctr-cpu').value = data.cpu;
+    document.getElementById('ctr-mem').value = data.memory;
+    renderRegisteredMounts((data.mount_roots || []).length ? data.mount_roots : cachedRoots);
+  } catch (error) {
+    if (!cachedRoots.length) {
+      container.innerHTML = `<div class="form-hint">读取失败：${escapeHtml(error.message)}</div>`;
+    }
+    toast(error.message || '服务器挂载目录读取失败', 'danger');
+  }
+}
+
+function togglePasswordAccess() {
+  const enabled = document.getElementById('ctr-password-access').checked;
+  document.getElementById('ctr-ssh-password').style.display = enabled ? 'block' : 'none';
+}
 
 /* ═══════════════════════════════════════════════
    TOAST
@@ -1519,6 +1591,51 @@ function parseContainerMounts(text) {
   }).filter(item => item.host_path && item.host_path.startsWith('/'));
 }
 
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+}
+
+function renderRegisteredMounts(roots) {
+  const container = document.getElementById('ctr-registered-mounts');
+  const user = document.getElementById('ctr-user').value || document.getElementById('ctr-name').value || 'user';
+  if (!roots.length) {
+    container.innerHTML = '<div class="form-hint">该服务器尚未注册挂载根目录。</div>';
+    return;
+  }
+  container.innerHTML = roots.map((root, index) => {
+    const hostPath = root.readonly ? root.host_path : `${root.host_path.replace(/\/$/, '')}/${user}`;
+    const mode = root.readonly ? 'ro' : 'rw';
+    return `<div class="check-row">
+      <input type="checkbox" class="registered-mount-check" ${index === 0 ? 'checked' : ''}>
+      <div><strong>${escapeHtml(root.name || root.host_path)}</strong>
+        <input class="form-input registered-mount-host" value="${escapeHtml(hostPath)}"></div>
+      <input class="form-input registered-mount-container" value="${escapeHtml(root.default_container_path || '/workspace')}">
+      <select class="form-select registered-mount-mode" ${root.readonly ? 'disabled' : ''}>
+        <option value="rw" ${mode === 'rw' ? 'selected' : ''}>rw</option>
+        <option value="ro" ${mode === 'ro' ? 'selected' : ''}>ro</option>
+      </select>
+    </div>`;
+  }).join('');
+}
+
+function collectRegisteredMounts() {
+  return [...document.querySelectorAll('#ctr-registered-mounts .check-row')]
+    .filter(row => row.querySelector('.registered-mount-check').checked)
+    .map(row => ({
+      host_path: row.querySelector('.registered-mount-host').value,
+      container_path: row.querySelector('.registered-mount-container').value || '/workspace',
+      readonly: row.querySelector('.registered-mount-mode').value === 'ro'
+    }));
+}
+
+function serializeMountRoots(roots) {
+  return (roots || []).map(root =>
+    `${root.name || root.host_path}|${root.host_path}|${root.default_container_path || '/workspace'}|${root.readonly ? 'ro' : 'rw'}`
+  ).join('\n');
+}
+
 /* ═══════════════════════════════════════════════
    LOAD DATA
 ═══════════════════════════════════════════════ */
@@ -1562,13 +1679,16 @@ async function loadOverview() {
 
   // 服务器下拉
   const sel = document.getElementById('ctr-server');
+  const selectedServer = sel.value;
   sel.innerHTML = '<option value="">-- 选择服务器 --</option>' +
     STATE.servers.map(s => `<option value="${s.id}">${s.name} (${s.host})</option>`).join('');
+  if (STATE.servers.some(server => server.id === selectedServer)) {
+    sel.value = selectedServer;
+  }
 
-  // 模拟负载
-  const load = Math.random() * 60 + 10;
-  document.getElementById('load-val').textContent = load.toFixed(0) + '%';
-  document.getElementById('load-bar').style.width = load + '%';
+  const onlinePercent = srvCnt ? STATE.servers.filter(s => s.status === 'online').length / srvCnt * 100 : 0;
+  document.getElementById('load-val').textContent = onlinePercent.toFixed(0) + '%';
+  document.getElementById('load-bar').style.width = onlinePercent + '%';
 }
 
 async function loadContainers() {
@@ -1620,6 +1740,7 @@ async function loadServers() {
       <td><span class="badge badge-info">${s.containers} 个</span></td>
       <td>${statusBadge(s.status)}</td>
       <td>
+        <button class="btn" onclick="editServer('${s.id}')">编辑</button>
         <button class="btn btn-danger" onclick="delServer('${s.id}')">移除</button>
       </td>
     </tr>`).join('');
@@ -1677,14 +1798,16 @@ async function createContainer() {
     pids_limit:  parseInt(document.getElementById('ctr-pids').value) || 512,
     ssh_port:    parseInt(document.getElementById('ctr-port').value) || 32001,
     ssh_public_key: document.getElementById('ctr-ssh-key').value,
-    mounts: parseContainerMounts(document.getElementById('ctr-mounts').value)
+    password_access: document.getElementById('ctr-password-access').checked,
+    ssh_password: document.getElementById('ctr-ssh-password').value,
+    mounts: collectRegisteredMounts().concat(parseContainerMounts(document.getElementById('ctr-mounts').value))
   };
   const res = await api('/api/containers', { method: 'POST', body: JSON.stringify(body) });
   if (res.ok) {
     toast('容器创建成功！', 'ok');
     document.getElementById('ssh-cmd-text').textContent = res.ssh_cmd;
     document.getElementById('ssh-result').style.display = 'block';
-    loadOverview();
+    loadOverview(); loadAuditLogs();
   } else {
     toast(res.error || '创建失败', 'danger');
   }
@@ -1701,17 +1824,48 @@ async function updateResources(id, cpu, mem, pids) {
     method: 'PATCH',
     body: JSON.stringify({ cpu_limit: nextCpu, mem_limit: nextMem, pids_limit: parseInt(nextPids) || 512 })
   });
-  if (res.ok) { toast('资源配置已更新', 'ok'); loadContainers(); loadOverview(); }
+  if (res.ok) { toast('资源配置已更新', 'ok'); loadContainers(); loadOverview(); loadAuditLogs(); }
   else { toast(res.error || '资源更新失败', 'danger'); }
 }
 
 async function delContainer(id) {
   if (!confirm('确认删除该容器？')) return;
   const res = await api(`/api/containers/${id}`, { method: 'DELETE' });
-  if (res.ok) { toast('容器已删除', 'warn'); loadContainers(); loadOverview(); }
+  if (res.ok) { toast('容器已删除', 'warn'); loadContainers(); loadOverview(); loadAuditLogs(); }
 }
 
-async function addServer() {
+function openAddServerModal() {
+  STATE.editingServerId = null;
+  document.getElementById('srv-modal-title').textContent = '注册服务器节点';
+  document.getElementById('srv-submit-btn').textContent = '注册服务器';
+  document.getElementById('srv-id').disabled = false;
+  ['srv-name', 'srv-id', 'srv-host', 'srv-ssh-host', 'srv-token', 'srv-mount-roots'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('srv-agent-port').value = '5001';
+  document.getElementById('srv-token').placeholder = '部署 Agent 时使用的 Token';
+  openModal('modal-add-srv');
+}
+
+function editServer(id) {
+  const server = STATE.servers.find(item => item.id === id);
+  if (!server) return;
+  STATE.editingServerId = id;
+  document.getElementById('srv-modal-title').textContent = '编辑服务器节点';
+  document.getElementById('srv-submit-btn').textContent = '保存修改';
+  document.getElementById('srv-id').value = server.id;
+  document.getElementById('srv-id').disabled = true;
+  document.getElementById('srv-name').value = server.name || '';
+  document.getElementById('srv-host').value = server.host || '';
+  document.getElementById('srv-ssh-host').value = server.ssh_host || server.host || '';
+  document.getElementById('srv-agent-port').value = server.agent_port || 5001;
+  document.getElementById('srv-token').value = '';
+  document.getElementById('srv-token').placeholder = '留空表示保留现有 Token';
+  document.getElementById('srv-mount-roots').value = serializeMountRoots(server.mount_roots);
+  openModal('modal-add-srv');
+}
+
+async function saveServer() {
   const body = {
     id:         document.getElementById('srv-id').value,
     name:       document.getElementById('srv-name').value,
@@ -1721,11 +1875,16 @@ async function addServer() {
     agent_token: document.getElementById('srv-token').value,
     mount_roots: parseMountRoots(document.getElementById('srv-mount-roots').value)
   };
-  const res = await api('/api/servers', { method: 'POST', body: JSON.stringify(body) });
+  const editing = STATE.editingServerId;
+  const res = await api(editing ? `/api/servers/${editing}` : '/api/servers', {
+    method: editing ? 'PATCH' : 'POST',
+    body: JSON.stringify(body)
+  });
   if (res.ok) {
-    toast('服务器注册成功', 'ok');
+    toast(editing ? '服务器配置已更新' : '服务器注册成功', 'ok');
+    STATE.editingServerId = null;
     closeModal('modal-add-srv');
-    loadServers(); loadOverview();
+    loadServers(); loadOverview(); loadAuditLogs();
   } else {
     toast(res.error || '注册失败', 'danger');
   }
@@ -1734,20 +1893,20 @@ async function addServer() {
 async function delServer(id) {
   if (!confirm('确认移除该服务器？')) return;
   const res = await api(`/api/servers/${id}`, { method: 'DELETE' });
-  if (res.ok) { toast('服务器已移除', 'warn'); loadServers(); loadOverview(); }
+  if (res.ok) { toast('服务器已移除', 'warn'); loadServers(); loadOverview(); loadAuditLogs(); }
 }
 
 async function addUser() {
   const body = {
     username: document.getElementById('usr-name').value,
-    password: document.getElementById('usr-pass').value || 'changeme',
+    password: document.getElementById('usr-pass').value,
     role:     document.getElementById('usr-role').value
   };
   const res = await api('/api/users', { method: 'POST', body: JSON.stringify(body) });
   if (res.ok) {
     toast('用户添加成功', 'ok');
     closeModal('modal-add-usr');
-    loadUsers();
+    loadUsers(); loadAuditLogs();
   } else {
     toast(res.error || '添加失败', 'danger');
   }
@@ -1756,7 +1915,7 @@ async function addUser() {
 async function delUser(uname) {
   if (!confirm(`确认删除用户 ${uname}？`)) return;
   const res = await api(`/api/users/${uname}`, { method: 'DELETE' });
-  if (res.ok) { toast('用户已删除', 'warn'); loadUsers(); }
+  if (res.ok) { toast('用户已删除', 'warn'); loadUsers(); loadAuditLogs(); }
 }
 
 function copySSH() {
@@ -1765,27 +1924,29 @@ function copySSH() {
 }
 
 /* ═══════════════════════════════════════════════
-   SSE LOG STREAM
+   AUDIT LOGS
 ═══════════════════════════════════════════════ */
-function startLogStream() {
-  const es = new EventSource('/api/stream/logs');
-  es.onmessage = e => {
-    const d = JSON.parse(e.data);
-    const body = document.getElementById('log-body');
-    const type = d.msg.includes('[OK]') ? 'ok' :
-                 d.msg.includes('[WARN]') ? 'warn' :
-                 d.msg.includes('[ERR]') ? 'danger' : 'info';
-    const line = document.createElement('div');
-    line.className = 'log-line';
-    line.innerHTML = `<span class="log-time">${d.time}</span><span class="log-msg ${type}">${d.msg}</span>`;
-    body.appendChild(line);
+async function loadAuditLogs() {
+  const data = await api('/api/logs');
+  const logs = data.logs || [];
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('ov-ops').textContent = logs.filter(item => (item.time || '').startsWith(today)).length;
+  const render = body => {
+    body.innerHTML = '';
+    if (!logs.length) {
+      body.innerHTML = '<div class="log-line"><span class="log-msg info">暂无操作记录</span></div>';
+      return;
+    }
+    logs.forEach(d => {
+      const type = d.level === 'WARN' ? 'warn' : d.level === 'ERR' ? 'danger' : 'info';
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.innerHTML = `<span class="log-time">${escapeHtml((d.time || '').slice(11, 19))}</span><span class="log-msg ${type}">[${escapeHtml(d.level)}] ${escapeHtml(d.message)}</span>`;
+      body.appendChild(line);
+    });
     body.scrollTop = body.scrollHeight;
-
-    // 审计日志同步
-    const ab = document.getElementById('audit-log-body');
-    ab.appendChild(line.cloneNode(true));
-    ab.scrollTop = ab.scrollHeight;
   };
+  [document.getElementById('log-body'), document.getElementById('audit-log-body')].forEach(render);
 }
 
 /* ═══════════════════════════════════════════════
@@ -1794,7 +1955,8 @@ function startLogStream() {
 (async function init() {
   await loadOverview();
   if (STATE.role === 'admin') { await loadUsers(); }
-  startLogStream();
+  await loadAuditLogs();
+  setInterval(loadAuditLogs, 10000);
 })();
 </script>
 </body>
