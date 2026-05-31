@@ -110,6 +110,31 @@ def safe_name(value, default="dockeruser"):
     value = value.strip("_-")
     return value or default
 
+def ensure_dir(path: Path, mode=0o700):
+    if path.exists() and not path.is_dir():
+        path.unlink(missing_ok=True)
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+
+def cleanup_secret_path(path):
+    secret_path = Path(path)
+    if not secret_path.exists():
+        return
+    if secret_path.is_dir():
+        shutil.rmtree(secret_path)
+        return
+    secret_path.unlink(missing_ok=True)
+
+def prepare_secret_file(path, content):
+    secret_path = Path(path)
+    ensure_dir(secret_path.parent, mode=0o700)
+    cleanup_secret_path(secret_path)
+    temp_path = secret_path.with_name(f".{secret_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    cleanup_secret_path(temp_path)
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.chmod(0o600)
+    os.replace(temp_path, secret_path)
+    return secret_path
+
 def inspect_container_details(name):
     code, out, err = run(["docker", "inspect", name, "--format", "{{json .}}"], timeout=20)
     if code != 0:
@@ -846,10 +871,7 @@ def create_container():
     password_file = None
     if password_access:
         secret_dir = WORKDIR / "secrets"
-        secret_dir.mkdir(mode=0o700, exist_ok=True)
-        password_file = secret_dir / f"{safe_name(name)}.password"
-        password_file.write_text(ssh_password, encoding="utf-8")
-        password_file.chmod(0o600)
+        password_file = prepare_secret_file(secret_dir / f"{safe_name(name)}.password", ssh_password)
 
     max_attempts = 8 if ssh_port is None else 1
     code, out, err = -1, "", "未开始执行"
@@ -928,7 +950,7 @@ def create_container():
         if "already in use by container" in err_lower:
             existing, _ = inspect_container_details(name)
             if password_file:
-                password_file.unlink(missing_ok=True)
+                cleanup_secret_path(password_file)
             return jsonify({
                 "ok": False,
                 "error": f"容器名称已存在: {name}",
@@ -940,7 +962,7 @@ def create_container():
             continue
         if port_conflict:
             if password_file:
-                password_file.unlink(missing_ok=True)
+                cleanup_secret_path(password_file)
             return jsonify({
                 "ok": False,
                 "error": f"SSH 端口 {selected_ssh_port} 已被占用",
@@ -950,7 +972,7 @@ def create_container():
 
     if code != 0:
         if password_file:
-            password_file.unlink(missing_ok=True)
+            cleanup_secret_path(password_file)
         error_code = "ssh_port_conflict" if "port is already allocated" in (err or "").lower() else "docker_run_failed"
         return jsonify({"ok": False, "error": err, "code": error_code}), 500
 
@@ -1029,7 +1051,7 @@ def remove_container(name):
         if volume_code != 0:
             volume_error = volume_err
     if code == 0 and password_file:
-        Path(password_file).unlink(missing_ok=True)
+        cleanup_secret_path(password_file)
     return jsonify({
         "ok": code == 0,
         "error": err if code != 0 else None,

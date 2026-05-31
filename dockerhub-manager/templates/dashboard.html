@@ -1554,7 +1554,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
         <div class="form-label" style="margin-top:12px">→ 生成的 SSH 登录命令</div>
         <div class="ssh-output">
           <span id="ssh-cmd-text"></span>
-          <button class="copy-btn" onclick="copySSH()">复制</button>
+          <button class="copy-btn" type="button" onclick="copySSH()">复制</button>
         </div>
       </div>
     </div>
@@ -2714,9 +2714,42 @@ async function delUser(uname) {
   if (res.ok) { toast('用户已删除', 'warn'); loadUsers(); loadAuditLogs(); }
 }
 
-function copySSH() {
+async function copyText(text) {
+  const value = String(text || '').trim();
+  if (!value) {
+    throw new Error('没有可复制的内容');
+  }
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  try {
+    if (!document.execCommand('copy')) {
+      throw new Error('浏览器未允许复制到剪贴板');
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+async function copySSH() {
   const t = document.getElementById('ssh-cmd-text').textContent;
-  navigator.clipboard.writeText(t).then(() => toast('SSH 命令已复制', 'ok'));
+  try {
+    await copyText(t);
+    toast('SSH 命令已复制', 'ok');
+  } catch (err) {
+    toast(err.message || '复制失败，请手动复制', 'warn');
+  }
 }
 
 /* ═══════════════════════════════════════════════
