@@ -602,10 +602,30 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
 .runtime-metrics {
   font-family: var(--mono);
   font-size: 11px;
-  line-height: 1.65;
+  line-height: 1.45;
   color: var(--text-mid);
   white-space: normal;
   word-break: break-word;
+  display: grid;
+  gap: 6px;
+}
+
+.runtime-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 12px;
+}
+
+.runtime-metrics-line {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.runtime-metrics-extra {
+  display: grid;
+  gap: 2px;
 }
 
 .runtime-metrics .metric-muted {
@@ -2375,30 +2395,28 @@ function renderContainerGpuMetrics(container, metric) {
   } else if (!gpu.utilization_supported && (activeDevices.length || configuredDevices.length)) {
     topLine += ' | GPU% 仅显存';
   }
-  lines.push(`<div>${topLine}</div>`);
+  lines.push(`<div class="runtime-metrics-line">${topLine}</div>`);
 
+  let detailText = '';
   if (!activeDevices.length) {
-    lines.push('<div class="metric-muted">当前无 GPU 进程</div>');
+    detailText = '当前无 GPU 进程';
   } else {
-    const details = activeDevices.map(device => {
+    detailText = activeDevices.map(device => {
       const memoryText = formatBytesCompact(device.container_memory_used_bytes || 0);
       const utilText = gpu.utilization_supported
         ? formatPercent(device.container_util_percent || 0)
         : '仅显存';
       return `#${escapeHtml(device.id)} ${escapeHtml(memoryText)} / ${escapeHtml(utilText)}`;
     }).join(' · ');
-    lines.push(`<div class="metric-muted">${details}</div>`);
   }
 
   if (!gpu.utilization_supported && gpu.utilization_reason) {
-    lines.push(`<div class="metric-muted">${escapeHtml(gpu.utilization_reason)}</div>`);
+    detailText += detailText ? ' · ' : '';
+    detailText += escapeHtml(gpu.utilization_reason);
   }
 
-  const sharedContainers = getSharedGpuContainerNames(container, configuredDevices.length ? configuredDevices : displayDevices);
-  if (sharedContainers.length) {
-    const preview = sharedContainers.slice(0, 2).map(name => escapeHtml(name)).join(', ');
-    const suffix = sharedContainers.length > 2 ? ` 等 ${sharedContainers.length} 个容器` : '';
-    lines.push(`<div class="metric-muted">共享: ${preview}${suffix}</div>`);
+  if (detailText) {
+    lines.push(`<div class="metric-muted runtime-metrics-line">${detailText}</div>`);
   }
 
   return lines.join('');
@@ -2424,11 +2442,13 @@ function renderContainerMetrics(container) {
     ? `${metric.pids_current} / ${container.pids_limit || '—'}`
     : `— / ${container.pids_limit || '—'}`;
   return `<div class="runtime-metrics">
-    <div>CPU ${formatPercent(metric.cpu_percent)}</div>
-    <div>MEM ${memoryText}</div>
-    <div>PIDS ${escapeHtml(String(pidsText))}</div>
-    <div>DISK ${formatBytesCompact(metric.disk_rw_bytes)}</div>
-    ${gpuHtml}
+    <div class="runtime-metrics-grid">
+      <div class="runtime-metrics-line">CPU ${formatPercent(metric.cpu_percent)}</div>
+      <div class="runtime-metrics-line">MEM ${memoryText}</div>
+      <div class="runtime-metrics-line">PIDS ${escapeHtml(String(pidsText))}</div>
+      <div class="runtime-metrics-line">DISK ${formatBytesCompact(metric.disk_rw_bytes)}</div>
+    </div>
+    ${gpuHtml ? `<div class="runtime-metrics-extra">${gpuHtml}</div>` : ''}
   </div>`;
 }
 
