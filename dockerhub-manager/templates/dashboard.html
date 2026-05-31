@@ -771,6 +771,23 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   line-height: 1.5;
 }
 
+.server-check-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.server-check-line {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-lo);
+}
+
+.server-check-line strong {
+  color: var(--text-mid);
+  font-weight: 600;
+}
+
 .resource-card {
   background: linear-gradient(180deg, var(--bg-panel), var(--bg-surface));
   border: 1px solid var(--border);
@@ -1954,6 +1971,36 @@ function renderContainerMetrics(container) {
   </div>`;
 }
 
+function renderServerCheckCell(server) {
+  const checks = server.checks || {};
+  const warnings = (checks.warnings || []).length;
+  const storage = checks.storage || {};
+  const gpu = checks.gpu || {};
+  const lines = [];
+
+  if (storage.driver) {
+    if (storage.supports_rootfs_limit) {
+      lines.push(`<div class="server-check-line"><strong>磁盘上限</strong> 支持 (${escapeHtml(storage.driver)})</div>`);
+    } else {
+      lines.push(`<div class="server-check-line"><strong>磁盘上限</strong> 不支持：${escapeHtml(storage.reason || '当前存储驱动未启用该功能')}</div>`);
+    }
+  }
+
+  if (gpu.supported) {
+    const gpuCount = (gpu.devices || []).length;
+    lines.push(`<div class="server-check-line"><strong>GPU</strong> 可用 (${gpuCount} 张)</div>`);
+  } else if ((gpu.devices || []).length || (gpu.missing || []).length) {
+    const firstMissing = (gpu.missing || [])[0] || '当前未满足 GPU 容器运行条件';
+    lines.push(`<div class="server-check-line"><strong>GPU</strong> ${escapeHtml(firstMissing)}</div>`);
+  }
+
+  const head = warnings
+    ? `<span class="badge badge-warn">${warnings} 警告</span>`
+    : statusBadge(server.status);
+
+  return `<div class="server-check-cell">${head}${lines.join('')}</div>`;
+}
+
 function renderContainersTable() {
   const tbody = document.getElementById('ctr-table-body');
   if (!STATE.containers.length) {
@@ -2134,7 +2181,7 @@ async function loadServers() {
       <td class="td-mono">${s.host}</td>
       <td class="td-mono">${s.agent_port || 5001}</td>
       <td class="td-mono">${(s.mount_roots || []).map(r => r.host_path).join('<br>') || '—'}</td>
-      <td>${(s.checks && s.checks.warnings && s.checks.warnings.length) ? `<span class="badge badge-warn">${s.checks.warnings.length} 警告</span>` : statusBadge(s.status)}</td>
+      <td>${renderServerCheckCell(s)}</td>
       <td><span class="badge badge-info">${containerCountMap[s.id] ?? s.containers} 个</span></td>
       <td>${statusBadge(s.status)}</td>
       <td>
