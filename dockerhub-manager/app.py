@@ -121,7 +121,7 @@ def call_agent(server: dict, path: str, method="GET", body=None, timeout=20):
         elif method == "PATCH":
             resp = agent_http.patch(url, json=body or {}, headers=headers, timeout=timeout)
         elif method == "DELETE":
-            resp = agent_http.delete(url, headers=headers, timeout=timeout)
+            resp = agent_http.delete(url, json=body or {}, headers=headers, timeout=timeout)
         else:
             resp = agent_http.get(url, headers=headers, timeout=timeout)
         try:
@@ -339,6 +339,11 @@ def register_container_record(
     gpu_devices=None,
     gpu_mode="",
     rootfs_limit="",
+    image_mode="",
+    allow_sudo=None,
+    password_access=None,
+    config_volume="",
+    password_file="",
     agent_container_id="",
     status="running",
     created_at="",
@@ -375,6 +380,11 @@ def register_container_record(
         "gpu_devices": list(gpu_devices if gpu_devices is not None else record.get("gpu_devices", [])),
         "gpu_mode": gpu_mode or record.get("gpu_mode", ""),
         "rootfs_limit": rootfs_limit or record.get("rootfs_limit", ""),
+        "image_mode": image_mode or record.get("image_mode", ""),
+        "allow_sudo": bool(allow_sudo if allow_sudo is not None else record.get("allow_sudo", True)),
+        "password_access": bool(password_access if password_access is not None else record.get("password_access", False)),
+        "config_volume": config_volume or record.get("config_volume", ""),
+        "password_file": password_file or record.get("password_file", ""),
         "status": status or record.get("status", "unknown"),
         "created_at": created_at or record.get("created_at", datetime.now().isoformat()),
         "created_by": next_created_by,
@@ -416,6 +426,11 @@ def reconcile_containers(data):
                 gpu_devices=parse_label_list(labels.get("manager.gpu_devices", "")),
                 gpu_mode=labels.get("manager.gpu_mode", ""),
                 rootfs_limit=labels.get("manager.rootfs_limit", ""),
+                image_mode=labels.get("manager.image_mode", ""),
+                allow_sudo=parse_label_bool(labels.get("manager.allow_sudo")) if "manager.allow_sudo" in labels else None,
+                password_access=parse_label_bool(labels.get("manager.password_access")) if "manager.password_access" in labels else None,
+                config_volume=labels.get("manager.config_volume", ""),
+                password_file=labels.get("manager.password_file", ""),
                 created_at=agent_container.get("created_at", ""),
                 recovered=True,
             )
@@ -455,6 +470,11 @@ def adopt_agent_container(data, server_id, server, name, defaults):
             gpu_devices=parse_label_list(agent_container.get("labels", {}).get("manager.gpu_devices", "")) or defaults.get("gpu_devices", []),
             gpu_mode=agent_container.get("labels", {}).get("manager.gpu_mode", defaults.get("gpu_mode", "")),
             rootfs_limit=agent_container.get("labels", {}).get("manager.rootfs_limit", defaults.get("rootfs_limit", "")),
+            image_mode=agent_container.get("labels", {}).get("manager.image_mode", defaults.get("image_mode", "")),
+            allow_sudo=parse_label_bool(agent_container.get("labels", {}).get("manager.allow_sudo")) if "manager.allow_sudo" in agent_container.get("labels", {}) else defaults.get("allow_sudo"),
+            password_access=parse_label_bool(agent_container.get("labels", {}).get("manager.password_access")) if "manager.password_access" in agent_container.get("labels", {}) else defaults.get("password_access"),
+            config_volume=agent_container.get("labels", {}).get("manager.config_volume", defaults.get("config_volume", "")),
+            password_file=agent_container.get("labels", {}).get("manager.password_file", defaults.get("password_file", "")),
             agent_container_id=agent_container.get("container_id", ""),
             status=agent_container.get("status", "running"),
             created_at=agent_container.get("created_at", ""),
@@ -733,6 +753,32 @@ def api_images():
         return jsonify({"error": result["error"], "images": []}), 502
     return jsonify({"ok": True, "images": result.get("images", [])})
 
+@app.route("/api/images", methods=["DELETE"])
+@login_required
+@role_required("admin", "allocator")
+def api_delete_image():
+    body = request.json or {}
+    with data_lock:
+        data = load_data()
+        server_id = body.get("server_id", "")
+        server = data["servers"].get(server_id)
+    if not server:
+        return jsonify({"error": "目标服务器不存在"}), 404
+    image_ref = str(body.get("image_ref", "") or "").strip()
+    if not image_ref:
+        return jsonify({"error": "缺少镜像标识"}), 400
+    result = call_agent(server, "/images", method="DELETE", body={"image_ref": image_ref}, timeout=180)
+    if not result.get("ok"):
+        status_code = result.get("status_code", 500)
+        if status_code < 400:
+            status_code = 500
+        return jsonify({"error": result.get("error", "镜像删除失败")}), status_code
+    with data_lock:
+        data = load_data()
+        append_audit(data, f"删除镜像 {image_ref}，服务器 {server_id}", "WARN")
+        save_data(data)
+    return jsonify({"ok": True})
+
 @app.route("/api/images/pull", methods=["POST"])
 @login_required
 @role_required("admin", "allocator")
@@ -807,6 +853,11 @@ def api_containers():
                 "gpu_devices": c.get("gpu_devices", []),
                 "gpu_mode": c.get("gpu_mode", ""),
                 "rootfs_limit": c.get("rootfs_limit", ""),
+                "image_mode": c.get("image_mode", ""),
+                "allow_sudo": bool(c.get("allow_sudo", True)),
+                "password_access": bool(c.get("password_access", False)),
+                "config_volume": c.get("config_volume", ""),
+                "password_file": c.get("password_file", ""),
                 "mounts": c.get("mounts", []),
                 "status": c.get("status", "running"),
                 "created_at": c.get("created_at", ""),
@@ -930,6 +981,11 @@ def api_create_container():
         "gpu_devices": requested_gpu_devices,
         "gpu_mode": agent_body["gpu_mode"] if gpu_enabled else "",
         "rootfs_limit": rootfs_limit,
+        "image_mode": agent_result.get("image_mode", ""),
+        "allow_sudo": agent_body["allow_sudo"],
+        "password_access": agent_body["password_access"],
+        "config_volume": agent_result.get("config_volume", ""),
+        "password_file": agent_result.get("password_file", ""),
         "created_by": session["user"],
     }
     if not agent_result.get("ok"):
@@ -982,6 +1038,11 @@ def api_create_container():
             gpu_devices=resolved_gpu_devices if isinstance(resolved_gpu_devices, list) else requested_gpu_devices,
             gpu_mode=agent_body["gpu_mode"] if gpu_enabled else "",
             rootfs_limit=rootfs_limit,
+            image_mode=agent_result.get("image_mode", ""),
+            allow_sudo=agent_result.get("allow_sudo", agent_body["allow_sudo"]),
+            password_access=agent_result.get("password_access", agent_body["password_access"]),
+            config_volume=agent_result.get("config_volume", ""),
+            password_file=agent_result.get("password_file", ""),
             agent_container_id=agent_result.get("container_id", ""),
             status=agent_result.get("status", "running"),
             created_at=datetime.now().isoformat(),
@@ -1062,6 +1123,116 @@ def api_update_container_resources(cid):
         append_audit(data, f"更新容器资源 {container.get('name', cid)}")
         save_data(data)
     return jsonify({"ok": True})
+
+@app.route("/api/containers/<cid>/backup-preview", methods=["GET"])
+@login_required
+def api_container_backup_preview(cid):
+    data = load_data()
+    container = data["containers"].get(cid)
+    if not container:
+        return jsonify({"error": "容器不存在"}), 404
+    server = data["servers"].get(container.get("server_id", ""))
+    if not server:
+        return jsonify({"error": "服务器不存在"}), 404
+    result = call_agent(server, f"/containers/{container.get('name')}/backup-preview", timeout=60)
+    if not result.get("ok"):
+        status_code = result.get("status_code", 500)
+        if status_code < 400:
+            status_code = 500
+        return jsonify({"error": result.get("error", "备份预估失败")}), status_code
+    return jsonify(result)
+
+@app.route("/api/containers/<cid>/backup-image", methods=["POST"])
+@login_required
+@role_required("admin", "allocator")
+def api_container_backup_image(cid):
+    body = request.json or {}
+    with data_lock:
+        data = load_data()
+        container = data["containers"].get(cid)
+        server = data["servers"].get(container.get("server_id", "")) if container else None
+    if not container:
+        return jsonify({"error": "容器不存在"}), 404
+    if not server:
+        return jsonify({"error": "服务器不存在"}), 404
+    payload = {
+        "image_name": body.get("image_name", ""),
+    }
+    result = call_agent(server, f"/containers/{container.get('name')}/backup-image", method="POST", body=payload, timeout=900)
+    if not result.get("ok"):
+        status_code = result.get("status_code", 500)
+        if status_code < 400:
+            status_code = 500
+        return jsonify({"error": result.get("error", "容器备份失败")}), status_code
+    with data_lock:
+        data = load_data()
+        append_audit(data, f"备份容器 {container.get('name', cid)} 为镜像 {result.get('image_ref', '')}，服务器 {container.get('server_id', '')}")
+        save_data(data)
+    return jsonify(result)
+
+@app.route("/api/containers/<cid>/rebuild", methods=["POST"])
+@login_required
+@role_required("admin", "allocator")
+def api_rebuild_container(cid):
+    body = request.json or {}
+    with data_lock:
+        data = load_data()
+        container = data["containers"].get(cid)
+        server = data["servers"].get(container.get("server_id", "")) if container else None
+    if not container:
+        return jsonify({"error": "容器不存在"}), 404
+    if not server:
+        return jsonify({"error": "服务器不存在"}), 404
+
+    payload = {
+        "cpu_limit": body.get("cpu_limit", container.get("cpu_limit")),
+        "mem_limit": body.get("mem_limit", container.get("mem_limit")),
+        "pids_limit": body.get("pids_limit", container.get("pids_limit", 512)),
+        "gpu_enabled": bool(body.get("gpu_enabled", container.get("gpu_enabled", False))),
+        "gpu_devices": body.get("gpu_devices", container.get("gpu_devices", [])),
+        "gpu_mode": body.get("gpu_mode", container.get("gpu_mode", "shared") or "shared"),
+        "rootfs_limit": str(body.get("rootfs_limit", container.get("rootfs_limit", "")) or "").strip(),
+        "source_type": body.get("source_type", "temporary_snapshot"),
+        "image_ref": body.get("image_ref", ""),
+    }
+    result = call_agent(server, f"/containers/{container.get('name')}/rebuild", method="POST", body=payload, timeout=1200)
+    if not result.get("ok"):
+        status_code = result.get("status_code", 500)
+        if status_code < 400:
+            status_code = 500
+        return jsonify({"error": result.get("error", "容器重建失败")}), status_code
+
+    with data_lock:
+        data = load_data()
+        container = data["containers"].get(cid)
+        if not container:
+            return jsonify({"error": "容器不存在"}), 404
+        container["cpu_limit"] = payload["cpu_limit"]
+        container["mem_limit"] = payload["mem_limit"]
+        container["pids_limit"] = payload["pids_limit"]
+        container["gpu_enabled"] = bool(result.get("gpu_enabled", payload["gpu_enabled"]))
+        container["gpu_driver"] = "nvidia" if container["gpu_enabled"] else ""
+        container["gpu_devices"] = result.get("gpu_devices", payload["gpu_devices"]) if isinstance(result.get("gpu_devices", payload["gpu_devices"]), list) else payload["gpu_devices"]
+        container["gpu_mode"] = result.get("gpu_mode", payload["gpu_mode"] if container["gpu_enabled"] else "")
+        container["rootfs_limit"] = result.get("rootfs_limit", payload["rootfs_limit"])
+        container["password_file"] = ""
+        container["status"] = result.get("status", "running")
+        container["agent_container_id"] = result.get("container_id", container.get("agent_container_id", ""))
+        if result.get("ssh_port"):
+            container["ssh_port"] = result.get("ssh_port")
+            server_ssh_host = server.get("ssh_host") or server.get("host", "server-host")
+            container["ssh_cmd"] = build_ssh_cmd(container.get("login_user", "dockeruser"), container["ssh_port"], server_ssh_host)
+        if result.get("image"):
+            container["image"] = result.get("image")
+        if result.get("image_mode"):
+            container["image_mode"] = result.get("image_mode")
+        source_suffix = f" / {payload['image_ref']}" if payload.get("image_ref") else ""
+        append_audit(
+            data,
+            f"重建容器 {container.get('name', cid)}，来源 {payload['source_type']}{source_suffix}"
+        )
+        save_data(data)
+    return jsonify(result)
 
 # ── API：用户管理 ────────────────────────────────────────────────────────────
 @app.route("/api/users", methods=["GET"])

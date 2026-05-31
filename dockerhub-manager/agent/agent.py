@@ -135,14 +135,19 @@ def prepare_secret_file(path, content):
     os.replace(temp_path, secret_path)
     return secret_path
 
-def inspect_container_details(name):
+def inspect_container_raw(name):
     code, out, err = run(["docker", "inspect", name, "--format", "{{json .}}"], timeout=20)
     if code != 0:
         return None, err or "容器不存在"
     try:
-        raw = json.loads(out)
+        return json.loads(out), None
     except ValueError:
         return None, "docker inspect 返回无效 JSON"
+
+def inspect_container_details(name):
+    raw, error = inspect_container_raw(name)
+    if not raw:
+        return None, error
     labels = raw.get("Config", {}).get("Labels") or {}
     ports = []
     for container_port, bindings in (raw.get("NetworkSettings", {}).get("Ports") or {}).items():
@@ -174,6 +179,343 @@ def inspect_container_details(name):
         ),
         "ssh_port": ssh_port,
     }, None
+
+def inspect_image_details(image_ref):
+    code, out, err = run(["docker", "image", "inspect", image_ref, "--format", "{{json .}}"], timeout=30)
+    if code != 0:
+        return None, err or "镜像不存在"
+    try:
+        raw = json.loads(out)
+    except ValueError:
+        return None, "docker image inspect 返回无效 JSON"
+    config = raw.get("Config", {}) or {}
+    return {
+        "id": raw.get("Id", ""),
+        "repo_tags": raw.get("RepoTags") or [],
+        "repo_digests": raw.get("RepoDigests") or [],
+        "size_bytes": int(raw.get("Size") or 0),
+        "created_at": raw.get("Created", ""),
+        "labels": config.get("Labels") or {},
+        "env": config.get("Env") or [],
+        "entrypoint": config.get("Entrypoint") or [],
+        "cmd": config.get("Cmd") or [],
+        "raw": raw,
+    }, None
+
+def format_bytes_human(value):
+    try:
+        size = float(value or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    if size <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    index = 0
+    while size >= 1024 and index < len(units) - 1:
+        size /= 1024
+        index += 1
+    digits = 0 if index == 0 or size >= 100 else 1
+    return f"{size:.{digits}f} {units[index]}"
+
+def parse_label_bool(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+def bool_label(value):
+    return "true" if value else "false"
+
+def preferred_image_reference(repository, tag, fallback=""):
+    repo = str(repository or "").strip()
+    image_tag = str(tag or "").strip()
+    if repo and repo != "<none>":
+        if image_tag and image_tag != "<none>":
+            return f"{repo}:{image_tag}"
+        return repo
+    return str(fallback or "").strip()
+
+def preferred_repo_tag(repo_tags, fallback=""):
+    for item in repo_tags or []:
+        raw = str(item or "").strip()
+        if raw and not raw.startswith("<none>:"):
+            return raw
+    return str(fallback or "").strip()
+
+def build_backup_image_name(container_name):
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"dockerhub-backup/{safe_name(container_name, 'container')}:{stamp}"
+
+def build_temp_snapshot_image_name(container_name):
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"dockerhub-temp/{safe_name(container_name, 'container')}:{stamp}"
+
+def valid_image_reference(image_ref):
+    raw = str(image_ref or "").strip()
+    return bool(raw) and not raw.startswith("-") and not any(ch.isspace() for ch in raw)
+
+def dockerfile_label_instruction(key, value):
+    return f"LABEL {key}={json.dumps(str(value or ''))}"
+
+def commit_container_image(container_name, image_name, labels=None):
+    cmd = ["docker", "commit"]
+    for key, value in (labels or {}).items():
+        cmd += ["-c", dockerfile_label_instruction(key, value)]
+    cmd += [container_name, image_name]
+    code, out, err = run(cmd, timeout=600)
+    if code != 0:
+        return None, err or "容器提交镜像失败"
+    image_info, inspect_error = inspect_image_details(image_name)
+    if not image_info:
+        return None, inspect_error
+    return image_info, None
+
+def env_list_to_map(env_list):
+    env_map = {}
+    order = []
+    for item in env_list or []:
+        key, sep, value = str(item or "").partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        if key not in env_map:
+            order.append(key)
+        env_map[key] = value if sep else ""
+    return env_map, order
+
+def env_map_to_list(env_map, order):
+    keys = list(order or []) + [key for key in env_map.keys() if key not in (order or [])]
+    items = []
+    for key in keys:
+        if key not in env_map:
+            continue
+        items.append(f"{key}={env_map[key]}")
+    return items
+
+def extract_container_port_bindings(raw):
+    bindings = []
+    host_config = raw.get("HostConfig", {}) or {}
+    for container_port, entries in (host_config.get("PortBindings") or {}).items():
+        for item in entries or []:
+            host_port = str(item.get("HostPort") or "").strip()
+            host_ip = str(item.get("HostIp") or "").strip()
+            if not host_port:
+                continue
+            bindings.append({
+                "container_port": str(container_port or "").strip(),
+                "host_port": host_port,
+                "host_ip": host_ip,
+            })
+    return bindings
+
+def build_publish_arg(binding):
+    host_port = str(binding.get("host_port") or "").strip()
+    container_port = str(binding.get("container_port") or "").strip()
+    host_ip = str(binding.get("host_ip") or "").strip()
+    if not host_port or not container_port:
+        return ""
+    if host_ip and host_ip not in {"0.0.0.0", "::"}:
+        return f"{host_ip}:{host_port}:{container_port}"
+    return f"{host_port}:{container_port}"
+
+def strip_secret_binds(binds):
+    filtered = []
+    removed = []
+    for bind in binds or []:
+        raw = str(bind or "").strip()
+        if not raw:
+            continue
+        if ":/run/secrets/dockerhub_ssh_password" in raw:
+            removed.append(raw)
+            continue
+        filtered.append(raw)
+    return filtered, removed
+
+def rollback_container_name(name):
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    return safe_name(f"{name}__rollback__{stamp}", f"{name}_rollback")
+
+def remove_image_quietly(image_ref):
+    if not image_ref:
+        return
+    run(["docker", "image", "rm", image_ref], timeout=180)
+
+def resolve_container_image_mode(labels):
+    image_mode = str((labels or {}).get("manager.image_mode") or "").strip()
+    if image_mode:
+        return image_mode
+    container_ssh_port = str((labels or {}).get("manager.container_ssh_port") or "").strip()
+    return "linuxserver-openssh" if container_ssh_port == "2222" else "generic-bootstrap"
+
+def resolve_allow_sudo(labels, host_config):
+    if "manager.allow_sudo" in (labels or {}):
+        return parse_label_bool(labels.get("manager.allow_sudo"))
+    security_opts = [str(item or "") for item in (host_config or {}).get("SecurityOpt") or []]
+    return not any("no-new-privileges" in item for item in security_opts)
+
+def resolve_password_access(labels, raw_config):
+    if "manager.password_access" in (labels or {}):
+        return parse_label_bool(labels.get("manager.password_access"))
+    if (labels or {}).get("manager.password_file"):
+        return True
+    env_map, _ = env_list_to_map((raw_config or {}).get("Env") or [])
+    return str(env_map.get("PASSWORD_ACCESS", "")).strip().lower() == "true"
+
+def normalize_rebuild_resources(body, raw):
+    cpu = str(body.get("cpu", body.get("cpu_limit", "")) or "").strip()
+    memory = str(body.get("memory", body.get("mem_limit", "")) or "").strip()
+    pids_raw = body.get("pids_limit", "")
+    host_config = raw.get("HostConfig", {}) or {}
+
+    if not cpu:
+        nano_cpus = int(host_config.get("NanoCpus") or 0)
+        if nano_cpus > 0:
+            cpu = f"{nano_cpus / 1_000_000_000:.3f}".rstrip("0").rstrip(".")
+        else:
+            cpu = "1"
+    if not memory:
+        memory_bytes_value = int(host_config.get("Memory") or 0)
+        memory_gb = max(1, round(memory_bytes_value / (1024 ** 3))) if memory_bytes_value else 1
+        memory = f"{memory_gb}g"
+    if pids_raw in (None, ""):
+        pids_limit = int(host_config.get("PidsLimit") or 512)
+    else:
+        try:
+            pids_limit = int(pids_raw)
+        except (TypeError, ValueError):
+            pids_limit = 0
+    if not valid_memory(memory):
+        return None, "内存限制格式无效"
+    try:
+        if float(cpu) <= 0:
+            raise ValueError
+    except ValueError:
+        return None, "CPU 限制无效"
+    if pids_limit <= 0:
+        return None, "PIDs 限制无效"
+    return {
+        "cpu": cpu,
+        "memory": memory,
+        "pids_limit": pids_limit,
+    }, ""
+
+def resolve_rebuild_gpu_settings(body, labels):
+    gpu_enabled = bool(body.get("gpu_enabled", parse_label_bool((labels or {}).get("manager.gpu_enabled"))))
+    requested_devices = body.get("gpu_devices", None)
+    if requested_devices is None:
+        requested_devices = parse_label_csv((labels or {}).get("manager.gpu_devices", ""))
+    gpu_devices = normalize_gpu_device_list(requested_devices)
+    gpu_mode = str(body.get("gpu_mode", (labels or {}).get("manager.gpu_mode", "shared")) or "shared").strip() or "shared"
+    if gpu_mode != "shared":
+        return None, "当前仅支持共享 GPU 模式"
+    selected_gpu_devices = []
+    gpu_cli_value = ""
+    if not gpu_enabled:
+        return {
+            "gpu_enabled": False,
+            "gpu_devices": [],
+            "gpu_mode": "",
+            "gpu_driver": "",
+            "gpu_cli_value": "",
+        }, ""
+
+    gpu_info = collect_gpu_info()
+    if not gpu_info.get("supported"):
+        return None, gpu_info.get("missing", ["当前服务器未满足 GPU 容器运行条件"])[0]
+    available_devices = gpu_info.get("devices", [])
+    available_indices = [str(item.get("index", "")).strip() for item in available_devices if str(item.get("index", "")).strip()]
+    if not available_indices:
+        return None, "当前服务器未检测到可用 GPU"
+    if not gpu_devices:
+        selected_gpu_devices = available_indices
+    else:
+        invalid_devices = [item for item in gpu_devices if item not in available_indices]
+        if invalid_devices:
+            return None, f"所选 GPU 不存在: {', '.join(invalid_devices)}"
+        selected_gpu_devices = gpu_devices
+    gpu_cli_value = "all" if set(selected_gpu_devices) == set(available_indices) else f"device={','.join(selected_gpu_devices)}"
+    return {
+        "gpu_enabled": True,
+        "gpu_devices": selected_gpu_devices,
+        "gpu_mode": "shared",
+        "gpu_driver": "nvidia",
+        "gpu_cli_value": gpu_cli_value,
+    }, ""
+
+def build_rebuild_create_command(raw, image_ref, image_mode, resource_settings, gpu_settings, rootfs_limit, labels, allow_sudo):
+    host_config = raw.get("HostConfig", {}) or {}
+    raw_config = raw.get("Config", {}) or {}
+    password_access = resolve_password_access(labels, raw_config)
+    cmd = [
+        "docker", "create",
+        "--name", (raw.get("Name") or "").lstrip("/"),
+        "--cpus", resource_settings["cpu"],
+        "--memory", resource_settings["memory"],
+        "--pids-limit", str(resource_settings["pids_limit"]),
+        "--restart", str((host_config.get("RestartPolicy") or {}).get("Name") or "unless-stopped"),
+    ]
+
+    for cap in host_config.get("CapDrop") or []:
+        if cap:
+            cmd += ["--cap-drop", str(cap)]
+
+    security_opts = [str(item or "").strip() for item in host_config.get("SecurityOpt") or [] if str(item or "").strip()]
+    security_opts = [item for item in security_opts if "no-new-privileges" not in item]
+    if not allow_sudo:
+        security_opts.append("no-new-privileges")
+    for item in security_opts:
+        cmd += ["--security-opt", item]
+
+    for binding in extract_container_port_bindings(raw):
+        publish_value = build_publish_arg(binding)
+        if publish_value:
+            cmd += ["-p", publish_value]
+
+    binds, _ = strip_secret_binds(host_config.get("Binds") or [])
+    for bind in binds:
+        cmd += ["-v", bind]
+
+    env_map, env_order = env_list_to_map(raw_config.get("Env") or [])
+    env_map.pop("USER_PASSWORD_FILE", None)
+    env_map["SUDO_ACCESS"] = "true" if allow_sudo else "false"
+    env_map["PASSWORD_ACCESS"] = "true" if password_access else "false"
+    if gpu_settings.get("gpu_enabled"):
+        env_map["NVIDIA_VISIBLE_DEVICES"] = ",".join(gpu_settings["gpu_devices"])
+        env_map["NVIDIA_DRIVER_CAPABILITIES"] = "compute,utility"
+    else:
+        env_map.pop("NVIDIA_VISIBLE_DEVICES", None)
+        env_map.pop("NVIDIA_DRIVER_CAPABILITIES", None)
+    for item in env_map_to_list(env_map, env_order):
+        cmd += ["-e", item]
+
+    next_labels = dict(raw_config.get("Labels") or {})
+    next_labels["manager.image_mode"] = image_mode
+    next_labels["manager.gpu_enabled"] = bool_label(gpu_settings.get("gpu_enabled"))
+    next_labels["manager.gpu_driver"] = gpu_settings.get("gpu_driver", "")
+    next_labels["manager.gpu_devices"] = ",".join(gpu_settings.get("gpu_devices", []))
+    next_labels["manager.gpu_mode"] = gpu_settings.get("gpu_mode", "")
+    next_labels["manager.rootfs_limit"] = rootfs_limit
+    next_labels["manager.allow_sudo"] = bool_label(allow_sudo)
+    next_labels["manager.password_access"] = bool_label(password_access)
+    next_labels["manager.backup_kind"] = ""
+    next_labels["manager.backup_source_container"] = ""
+    next_labels["manager.backup_source_image"] = ""
+    next_labels["manager.backup_created_at"] = ""
+    next_labels.pop("manager.password_file", None)
+    for key, value in next_labels.items():
+        cmd += ["--label", f"{key}={value}"]
+
+    if rootfs_limit:
+        cmd += ["--storage-opt", f"size={rootfs_limit}"]
+    if gpu_settings.get("gpu_enabled"):
+        cmd += ["--gpus", gpu_settings["gpu_cli_value"]]
+
+    entrypoint = list((raw.get("Config", {}) or {}).get("Entrypoint") or [])
+    command = list((raw.get("Config", {}) or {}).get("Cmd") or [])
+    if entrypoint:
+        cmd += ["--entrypoint", entrypoint[0]]
+        command = entrypoint[1:] + command
+
+    cmd.append(image_ref)
+    cmd += command
+    return cmd
 
 def docker_info_json():
     code, out, err = run(["docker", "info", "--format", "{{json .}}"], timeout=30)
@@ -806,15 +1148,48 @@ def ping():
 @app.route("/images")
 @auth_required
 def list_images():
-    code, out, err = run("docker images --format '{{json .}}'")
+    code, out, err = run(["docker", "image", "ls", "--no-trunc", "--format", "{{json .}}"], timeout=60)
     images = []
     if code == 0:
         for line in out.splitlines():
             try:
-                images.append(json.loads(line))
+                row = json.loads(line)
             except Exception:
-                pass
+                continue
+            reference = preferred_image_reference(row.get("Repository"), row.get("Tag"), row.get("ID"))
+            image_info, inspect_error = inspect_image_details(reference)
+            labels = image_info.get("labels", {}) if image_info else {}
+            repo_tags = image_info.get("repo_tags", []) if image_info else []
+            size_bytes = image_info.get("size_bytes", 0) if image_info else parse_size_to_bytes(row.get("Size", "0"))
+            images.append({
+                **row,
+                "Reference": reference,
+                "RepoTags": repo_tags,
+                "Labels": labels,
+                "SizeBytes": size_bytes,
+                "CreatedAt": image_info.get("created_at", "") if image_info else "",
+                "backup_kind": labels.get("manager.backup_kind", ""),
+                "backup_source_container": labels.get("manager.backup_source_container", ""),
+                "image_mode": labels.get("manager.image_mode", ""),
+                "inspect_error": inspect_error or "",
+            })
+    images.sort(key=lambda item: item.get("CreatedAt") or item.get("CreatedSince") or "", reverse=True)
     return jsonify({"images": images, "error": err if code != 0 else None})
+
+@app.route("/images", methods=["DELETE"])
+@auth_required
+def delete_image():
+    body = request.get_json(silent=True) or {}
+    image_ref = str(body.get("image_ref", "") or "").strip()
+    if not image_ref:
+        return jsonify({"ok": False, "error": "缺少镜像标识"}), 400
+    code, out, err = run(["docker", "image", "rm", image_ref], timeout=180)
+    if code != 0:
+        message = err or out or "镜像删除失败"
+        lower = message.lower()
+        status_code = 409 if ("being used by running container" in lower or "image is being used" in lower or "must be forced" in lower) else 500
+        return jsonify({"ok": False, "error": message}), status_code
+    return jsonify({"ok": True, "output": out.splitlines() if out else []})
 
 @app.route("/images/pull", methods=["POST"])
 @auth_required
@@ -1107,6 +1482,7 @@ def create_container():
 
     container_ssh_port = 2222 if linuxserver_openssh else 22
     image_mode = "linuxserver-openssh" if linuxserver_openssh else "generic-bootstrap"
+    config_volume = ""
     password_file = None
     if password_access:
         secret_dir = WORKDIR / "secrets"
@@ -1138,6 +1514,8 @@ def create_container():
             "--label", f"manager.gpu_devices={','.join(selected_gpu_devices)}",
             "--label", f"manager.gpu_mode={gpu_mode if gpu_enabled else ''}",
             "--label", f"manager.rootfs_limit={rootfs_limit}",
+            "--label", f"manager.allow_sudo={bool_label(allow_sudo)}",
+            "--label", f"manager.password_access={bool_label(password_access)}",
             "--restart", "unless-stopped",
         ] + mount_args
         if not allow_sudo:
@@ -1225,6 +1603,11 @@ def create_container():
         "name":         name,
         "ssh_port":     selected_ssh_port,
         "status":       "running",
+        "image_mode":   image_mode,
+        "allow_sudo":   allow_sudo,
+        "password_access": password_access,
+        "config_volume": config_volume if linuxserver_openssh else "",
+        "password_file": str(password_file) if password_file else "",
         "gpu_enabled":  gpu_enabled,
         "gpu_devices":  selected_gpu_devices,
         "gpu_mode":     gpu_mode if gpu_enabled else "",
@@ -1271,6 +1654,223 @@ def update_container_resources(name):
     cmd.append(name)
     code, out, err = run(cmd)
     return jsonify({"ok": code == 0, "error": err if code != 0 else None})
+
+@app.route("/containers/<name>/backup-preview")
+@auth_required
+def container_backup_preview(name):
+    details, error = inspect_container_details(name)
+    if not details:
+        return jsonify({"ok": False, "error": error or "容器不存在"}), 404
+    size_info, size_error = inspect_container_size(name)
+    if not size_info:
+        return jsonify({"ok": False, "error": size_error or "容器大小读取失败"}), 500
+    image_info, image_error = inspect_image_details(details.get("image", ""))
+    if not image_info:
+        return jsonify({"ok": False, "error": image_error or "当前镜像读取失败"}), 500
+    estimated_writable_bytes = int(size_info.get("disk_rw_bytes") or 0)
+    current_image_size_bytes = int(image_info.get("size_bytes") or 0)
+    estimated_image_bytes = current_image_size_bytes + estimated_writable_bytes
+    return jsonify({
+        "ok": True,
+        "name": name,
+        "image": details.get("image", ""),
+        "suggested_image_name": build_backup_image_name(name),
+        "estimated_writable_bytes": estimated_writable_bytes,
+        "estimated_writable_text": format_bytes_human(estimated_writable_bytes),
+        "current_image_size_bytes": current_image_size_bytes,
+        "current_image_size_text": format_bytes_human(current_image_size_bytes),
+        "estimated_image_bytes": estimated_image_bytes,
+        "estimated_image_text": format_bytes_human(estimated_image_bytes),
+    })
+
+@app.route("/containers/<name>/backup-image", methods=["POST"])
+@auth_required
+def backup_container_image(name):
+    details, error = inspect_container_details(name)
+    if not details:
+        return jsonify({"ok": False, "error": error or "容器不存在"}), 404
+    body = request.get_json(silent=True) or {}
+    image_name = str(body.get("image_name", "") or "").strip() or build_backup_image_name(name)
+    if not valid_image_reference(image_name):
+        return jsonify({"ok": False, "error": "镜像名称无效"}), 400
+    existing_image, _ = inspect_image_details(image_name)
+    if existing_image:
+        return jsonify({"ok": False, "error": f"镜像已存在: {image_name}"}), 409
+    labels = details.get("labels") or {}
+    image_mode = resolve_container_image_mode(labels)
+    image_info, commit_error = commit_container_image(name, image_name, {
+        "manager.backup_kind": "manual_backup",
+        "manager.backup_source_container": name,
+        "manager.backup_source_image": details.get("image", ""),
+        "manager.backup_created_at": now(),
+        "manager.image_mode": image_mode,
+        "manager.login_user": labels.get("manager.login_user", ""),
+    })
+    if not image_info:
+        return jsonify({"ok": False, "error": commit_error or "容器备份失败"}), 500
+    reference = preferred_repo_tag(image_info.get("repo_tags", []), image_name)
+    return jsonify({
+        "ok": True,
+        "image_ref": reference,
+        "image_id": image_info.get("id", ""),
+        "size_bytes": image_info.get("size_bytes", 0),
+        "size_text": format_bytes_human(image_info.get("size_bytes", 0)),
+        "backup_kind": "manual_backup",
+        "backup_source_container": name,
+        "created_at": image_info.get("created_at", ""),
+    })
+
+@app.route("/containers/<name>/rebuild", methods=["POST"])
+@auth_required
+def rebuild_container(name):
+    raw, inspect_error = inspect_container_raw(name)
+    if not raw:
+        return jsonify({"ok": False, "error": inspect_error or "容器不存在"}), 404
+
+    body = request.get_json(silent=True) or {}
+    labels = dict((raw.get("Config", {}) or {}).get("Labels") or {})
+    host_config = raw.get("HostConfig", {}) or {}
+    source_type = str(body.get("source_type", "temporary_snapshot") or "temporary_snapshot").strip() or "temporary_snapshot"
+    current_image_mode = resolve_container_image_mode(labels)
+    allow_sudo = resolve_allow_sudo(labels, host_config)
+    resource_settings, resource_error = normalize_rebuild_resources(body, raw)
+    if not resource_settings:
+        return jsonify({"ok": False, "error": resource_error}), 400
+
+    rootfs_limit = str(body.get("rootfs_limit", labels.get("manager.rootfs_limit", "")) or "").strip()
+    if rootfs_limit:
+        if not valid_size_limit(rootfs_limit):
+            return jsonify({"ok": False, "error": "容器磁盘上限格式无效"}), 400
+        rootfs_limit = normalize_size_limit(rootfs_limit)
+        storage = collect_storage_capabilities()
+        if not storage.get("supports_rootfs_limit"):
+            return jsonify({
+                "ok": False,
+                "error": storage.get("reason") or "当前服务器不支持容器可写层磁盘限额",
+                "code": "rootfs_limit_unsupported",
+            }), 400
+
+    gpu_settings, gpu_error = resolve_rebuild_gpu_settings(body, labels)
+    if not gpu_settings:
+        return jsonify({"ok": False, "error": gpu_error}), 400
+
+    target_image_ref = ""
+    target_image_mode = current_image_mode
+    temporary_image_ref = ""
+    source_image_ref = ""
+    if source_type == "temporary_snapshot":
+        target_image_ref = build_temp_snapshot_image_name(name)
+        temporary_image_ref = target_image_ref
+        image_info, commit_error = commit_container_image(name, target_image_ref, {
+            "manager.backup_kind": "temporary_rebuild_snapshot",
+            "manager.backup_source_container": name,
+            "manager.backup_source_image": str((raw.get("Config", {}) or {}).get("Image") or ""),
+            "manager.backup_created_at": now(),
+            "manager.image_mode": current_image_mode,
+            "manager.login_user": labels.get("manager.login_user", ""),
+        })
+        if not image_info:
+            return jsonify({"ok": False, "error": commit_error or "容器临时快照创建失败"}), 500
+        source_image_ref = preferred_repo_tag(image_info.get("repo_tags", []), target_image_ref)
+    elif source_type == "backup_image":
+        target_image_ref = str(body.get("image_ref", "") or body.get("backup_image", "") or "").strip()
+        if not valid_image_reference(target_image_ref):
+            return jsonify({"ok": False, "error": "请选择有效的备份镜像"}), 400
+        image_info, image_error = inspect_image_details(target_image_ref)
+        if not image_info:
+            return jsonify({"ok": False, "error": image_error or "备份镜像不存在"}), 404
+        image_labels = image_info.get("labels", {}) or {}
+        if image_labels.get("manager.backup_kind") != "manual_backup":
+            return jsonify({"ok": False, "error": "当前仅支持从手动备份镜像重建"}), 400
+        target_image_mode = str(image_labels.get("manager.image_mode") or current_image_mode).strip() or current_image_mode
+        source_image_ref = preferred_repo_tag(image_info.get("repo_tags", []), target_image_ref)
+    else:
+        return jsonify({"ok": False, "error": "不支持的重建来源"}), 400
+
+    create_cmd = build_rebuild_create_command(
+        raw,
+        target_image_ref,
+        target_image_mode,
+        resource_settings,
+        gpu_settings,
+        rootfs_limit,
+        labels,
+        allow_sudo,
+    )
+    rollback_name = rollback_container_name(name)
+    new_container_id = ""
+
+    def cleanup_temp_image():
+        if temporary_image_ref:
+            remove_image_quietly(temporary_image_ref)
+
+    def restore_original_container(error_message):
+        rollback_errors = []
+        existing_new, _ = inspect_container_details(name)
+        if existing_new:
+            code, _, err = run(["docker", "rm", "-f", name], timeout=120)
+            if code != 0:
+                rollback_errors.append(f"删除失败的新容器失败: {err or 'unknown'}")
+        renamed, rename_error = inspect_container_details(rollback_name)
+        if renamed:
+            code, _, err = run(["docker", "rename", rollback_name, name], timeout=30)
+            if code != 0:
+                rollback_errors.append(f"回滚容器改名失败: {err or 'unknown'}")
+            else:
+                code, _, err = run(["docker", "start", name], timeout=120)
+                if code != 0 and "is already running" not in (err or "").lower():
+                    rollback_errors.append(f"回滚容器启动失败: {err or 'unknown'}")
+        cleanup_temp_image()
+        message = error_message
+        if rollback_errors:
+            message = f"{message}；回滚补救异常：{'；'.join(rollback_errors)}"
+        return jsonify({"ok": False, "error": message}), 500
+
+    code, _, err = run(["docker", "stop", name], timeout=120)
+    if code != 0 and "is not running" not in (err or "").lower():
+        cleanup_temp_image()
+        return jsonify({"ok": False, "error": err or "停止原容器失败"}), 500
+
+    code, _, err = run(["docker", "rename", name, rollback_name], timeout=30)
+    if code != 0:
+        cleanup_temp_image()
+        run(["docker", "start", name], timeout=120)
+        return jsonify({"ok": False, "error": err or "原容器改名失败"}), 500
+
+    code, out, err = run(create_cmd, timeout=600)
+    if code != 0:
+        return restore_original_container(err or "重建容器创建失败")
+    new_container_id = out
+
+    code, _, err = run(["docker", "start", name], timeout=180)
+    if code != 0:
+        return restore_original_container(err or "重建容器启动失败")
+
+    cleanup_warning = None
+    code, _, err = run(["docker", "rm", "-f", rollback_name], timeout=180)
+    if code != 0:
+        cleanup_warning = err or "旧容器清理失败"
+    cleanup_temp_image()
+    details, _ = inspect_container_details(name)
+    return jsonify({
+        "ok": True,
+        "container_id": new_container_id,
+        "name": name,
+        "status": details.get("status", "running") if details else "running",
+        "image": details.get("image", source_image_ref or target_image_ref) if details else (source_image_ref or target_image_ref),
+        "image_mode": target_image_mode,
+        "ssh_port": details.get("ssh_port", "") if details else "",
+        "source_type": source_type,
+        "source_image_ref": source_image_ref,
+        "gpu_enabled": gpu_settings.get("gpu_enabled", False),
+        "gpu_devices": gpu_settings.get("gpu_devices", []),
+        "gpu_mode": gpu_settings.get("gpu_mode", ""),
+        "rootfs_limit": rootfs_limit,
+        "cpu": resource_settings["cpu"],
+        "memory": resource_settings["memory"],
+        "pids_limit": resource_settings["pids_limit"],
+        "rollback_warning": cleanup_warning,
+    })
 
 @app.route("/containers/<name>/remove", methods=["DELETE"])
 @auth_required

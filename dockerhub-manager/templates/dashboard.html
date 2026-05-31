@@ -845,6 +845,75 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   line-height: 1.2;
 }
 
+.resource-section {
+  margin-bottom: 18px;
+  padding: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.resource-section:last-child {
+  margin-bottom: 0;
+}
+
+.resource-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.resource-section-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-hi);
+}
+
+.resource-section-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-lo);
+}
+
+.resource-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.resource-preview-item {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.modal-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.switch-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  font-size: 13px;
+  color: var(--text-mid);
+}
+
+.switch-line input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 .check-list {
   display: grid;
   gap: 8px;
@@ -1075,6 +1144,10 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   }
 
   .resource-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .resource-preview-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -1393,7 +1466,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           </div>
           <table>
             <thead>
-              <tr><th>仓库</th><th>标签</th><th>镜像 ID</th><th>创建时间</th><th>大小</th></tr>
+              <tr><th>镜像</th><th>类型</th><th>来源容器</th><th>镜像 ID</th><th>创建时间</th><th>大小</th><th>操作</th></tr>
             </thead>
             <tbody id="img-table-body"></tbody>
           </table>
@@ -1656,7 +1729,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
 <div class="modal-overlay" id="modal-edit-ctr-resource">
   <div class="modal">
     <div class="modal-head">
-      <div class="modal-title">修改容器资源</div>
+      <div class="modal-title">容器更新 / 备份 / 重建</div>
       <button class="modal-close" onclick="closeModal('modal-edit-ctr-resource')">✕</button>
     </div>
     <div class="modal-body">
@@ -1676,27 +1749,126 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <span class="resource-card-label">当前 PIDs</span>
             <span class="resource-card-value" id="edit-ctr-resource-current-pids">—</span>
           </div>
+          <div class="resource-card-item">
+            <span class="resource-card-label">当前 GPU</span>
+            <span class="resource-card-value" id="edit-ctr-resource-current-gpu">—</span>
+          </div>
+          <div class="resource-card-item">
+            <span class="resource-card-label">当前磁盘上限</span>
+            <span class="resource-card-value" id="edit-ctr-resource-current-rootfs">—</span>
+          </div>
         </div>
       </div>
-      <div class="form-row">
-        <div class="form-field">
-          <label class="form-label">CPU 限制（核）</label>
-          <input class="form-input" type="text" id="edit-ctr-resource-cpu" placeholder="1">
+
+      <div class="resource-section">
+        <div class="resource-section-head">
+          <div>
+            <div class="resource-section-title">在线修改</div>
+            <div class="resource-section-sub">直接下发 `docker update`，无需重建容器。</div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">CPU 限制（核）</label>
+            <input class="form-input" type="text" id="edit-ctr-resource-cpu" placeholder="1">
+          </div>
+          <div class="form-field">
+            <label class="form-label">内存限制</label>
+            <input class="form-input" type="text" id="edit-ctr-resource-mem" placeholder="8g">
+          </div>
         </div>
         <div class="form-field">
-          <label class="form-label">内存限制</label>
-          <input class="form-input" type="text" id="edit-ctr-resource-mem" placeholder="8g">
+          <label class="form-label">PIDs 限制</label>
+          <input class="form-input" type="number" id="edit-ctr-resource-pids" placeholder="512" min="1">
+          <div class="form-hint">这里只会修改 CPU / 内存 / PIDs，不处理 GPU 与磁盘上限。</div>
+        </div>
+        <div class="modal-inline-actions">
+          <button class="btn btn-primary" id="edit-ctr-resource-submit" onclick="saveContainerResources()">保存在线修改</button>
         </div>
       </div>
-      <div class="form-field" style="margin-bottom:0">
-        <label class="form-label">PIDs 限制</label>
-        <input class="form-input" type="number" id="edit-ctr-resource-pids" placeholder="512" min="1">
-        <div class="form-hint">修改后会直接下发到目标服务器上的 Docker 容器。</div>
+
+      <div class="resource-section" id="edit-ctr-backup-section">
+        <div class="resource-section-head">
+          <div>
+            <div class="resource-section-title">手动备份为镜像</div>
+            <div class="resource-section-sub">手动备份镜像不会自动删除，可在镜像库中单独清理。</div>
+          </div>
+        </div>
+        <div class="form-field">
+          <label class="form-label">备份镜像名称</label>
+          <input class="form-input" type="text" id="edit-ctr-backup-image-name" placeholder="dockerhub-backup/container:20260601-120000">
+        </div>
+        <div class="resource-preview-grid">
+          <div class="resource-preview-item">
+            <span class="resource-card-label">预计新增可写层</span>
+            <span class="resource-card-value" id="edit-ctr-backup-rw">加载中...</span>
+          </div>
+          <div class="resource-preview-item">
+            <span class="resource-card-label">当前镜像大小</span>
+            <span class="resource-card-value" id="edit-ctr-backup-base">加载中...</span>
+          </div>
+          <div class="resource-preview-item">
+            <span class="resource-card-label">预计生成镜像</span>
+            <span class="resource-card-value" id="edit-ctr-backup-estimated">加载中...</span>
+          </div>
+        </div>
+        <div class="form-hint" id="edit-ctr-backup-hint">正在读取容器可写层大小与镜像大小预估。</div>
+        <div class="modal-inline-actions">
+          <button class="btn" id="edit-ctr-backup-submit" onclick="backupContainerImage()">备份为镜像</button>
+        </div>
+      </div>
+
+      <div class="resource-section">
+        <div class="resource-section-head">
+          <div>
+            <div class="resource-section-title">需重建生效</div>
+            <div class="resource-section-sub">GPU 配置与容器可写层磁盘上限变更会走重建流程，并保留挂载数据。</div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">GPU 访问</label>
+            <label class="switch-line">
+              <input type="checkbox" id="edit-ctr-gpu-enabled" onchange="toggleEditContainerGpuFields()">
+              <span>启用共享 GPU</span>
+            </label>
+            <div class="form-hint" id="edit-ctr-gpu-hint">读取服务器 GPU 能力中...</div>
+          </div>
+          <div class="form-field">
+            <label class="form-label">容器磁盘上限（可写层）</label>
+            <input class="form-input" type="text" id="edit-ctr-rootfs-limit" placeholder="120g">
+            <div class="form-hint" id="edit-ctr-rootfs-hint">只限制容器自身系统层写入，不限制挂载目录、数据盘或 Docker volume。</div>
+          </div>
+        </div>
+        <div class="form-field">
+          <label class="form-label">GPU 设备</label>
+          <div class="check-list" id="edit-ctr-gpu-options">
+            <div class="form-hint">读取 GPU 列表中...</div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">重建来源</label>
+            <select class="form-select" id="edit-ctr-rebuild-source" onchange="toggleRebuildSourceFields()">
+              <option value="temporary_snapshot">当前容器生成临时快照重建</option>
+              <option value="backup_image">从已有手动备份镜像重建</option>
+            </select>
+          </div>
+          <div class="form-field" id="edit-ctr-rebuild-image-field" style="display:none">
+            <label class="form-label">备份镜像</label>
+            <select class="form-select" id="edit-ctr-rebuild-image">
+              <option value="">-- 选择手动备份镜像 --</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-hint" id="edit-ctr-rebuild-hint">选择“临时快照”时会先生成一次临时镜像，重建完成后自动删除。</div>
+        <div class="modal-inline-actions">
+          <button class="btn btn-primary" id="edit-ctr-rebuild-submit" onclick="rebuildContainer()">重建并应用变更</button>
+        </div>
       </div>
     </div>
     <div class="modal-foot">
-      <button class="btn" onclick="closeModal('modal-edit-ctr-resource')">取消</button>
-      <button class="btn btn-primary" id="edit-ctr-resource-submit" onclick="saveContainerResources()">保存修改</button>
+      <button class="btn" onclick="closeModal('modal-edit-ctr-resource')">关闭</button>
     </div>
   </div>
 </div>
@@ -1717,6 +1889,7 @@ const STATE = {
   containerMetricsErrors: {},
   users: [],
   containerImages: {},
+  imageCatalogs: {},
   editingServerId: null,
   editingContainerId: null,
   containerMetricsTimer: null,
@@ -1784,7 +1957,11 @@ function closeModal(id) {
   if (id === 'modal-edit-ctr-resource') {
     STATE.editingContainerId = null;
     document.getElementById('edit-ctr-resource-submit').disabled = false;
-    document.getElementById('edit-ctr-resource-submit').textContent = '保存修改';
+    document.getElementById('edit-ctr-resource-submit').textContent = '保存在线修改';
+    document.getElementById('edit-ctr-backup-submit').disabled = false;
+    document.getElementById('edit-ctr-backup-submit').textContent = '备份为镜像';
+    document.getElementById('edit-ctr-rebuild-submit').disabled = false;
+    document.getElementById('edit-ctr-rebuild-submit').textContent = '重建并应用变更';
   }
 }
 document.querySelectorAll('.modal-overlay').forEach(el => {
@@ -1952,11 +2129,37 @@ async function loadSelectedServerDefaults() {
 }
 
 function normalizeImageReference(image) {
+  const direct = (image && image.Reference) || '';
+  if (direct) return direct;
   const repository = (image && image.Repository) || '';
   const tag = (image && image.Tag) || '';
   if (!repository || repository === '<none>') return '';
   if (!tag || tag === '<none>') return repository;
   return `${repository}:${tag}`;
+}
+
+function getImageReference(image) {
+  return normalizeImageReference(image) || (image && image.ID) || '';
+}
+
+function getImageDisplayName(image) {
+  return getImageReference(image) || (image && image.ID) || '—';
+}
+
+function getImageKindText(image) {
+  const kind = (image && (image.backup_kind || ((image.Labels || {})['manager.backup_kind']))) || '';
+  if (kind === 'manual_backup') return '手动备份';
+  if (kind === 'temporary_rebuild_snapshot') return '临时快照';
+  return '普通镜像';
+}
+
+function cacheImageCatalog(serverId, images) {
+  STATE.imageCatalogs[serverId] = images || [];
+  STATE.containerImages[serverId] = [...new Set((images || []).map(getImageReference).filter(Boolean))];
+}
+
+function getManualBackupImages(serverId) {
+  return (STATE.imageCatalogs[serverId] || []).filter(image => image.backup_kind === 'manual_backup');
 }
 
 function toggleCustomContainerImage() {
@@ -2017,8 +2220,8 @@ async function loadSelectedServerImages() {
     hint.textContent = `镜像读取失败：${data.error}`;
     return;
   }
-  const images = [...new Set((data.images || []).map(normalizeImageReference).filter(Boolean))];
-  STATE.containerImages[sid] = images;
+  cacheImageCatalog(sid, data.images || []);
+  const images = STATE.containerImages[sid] || [];
   populateContainerImageSelect(images);
   hint.textContent = images.length
     ? `已读取 ${images.length} 个镜像，可直接下拉选择。`
@@ -2272,7 +2475,7 @@ function renderContainersTable() {
       <td>
         ${c.status === 'missing'
           ? '<span style="font-size:11px;color:var(--text-lo)">已失联</span>'
-          : `<button class="btn" onclick="openContainerResourceModal('${c.id}')">修改资源</button>`}
+          : `<button class="btn" onclick="openContainerResourceModal('${c.id}')">更新 / 备份</button>`}
         <button class="btn btn-danger" onclick="delContainer('${c.id}')">删除</button>
       </td>
     </tr>`).join('');
@@ -2498,12 +2701,22 @@ function populateImageServerSelect() {
   }
 }
 
+async function ensureImageCatalog(serverId) {
+  if (!serverId) return [];
+  const data = await api(`/api/images?server_id=${encodeURIComponent(serverId)}`);
+  if (data.error) {
+    throw new Error(data.error || '镜像列表读取失败');
+  }
+  cacheImageCatalog(serverId, data.images || []);
+  return data.images || [];
+}
+
 async function loadImagesPanel() {
   populateImageServerSelect();
   const serverId = document.getElementById('img-server').value;
   if (!serverId) {
     document.getElementById('img-table-body').innerHTML =
-      '<tr><td colspan="5">请先选择目标服务器。</td></tr>';
+      '<tr><td colspan="7">请先选择目标服务器。</td></tr>';
     document.getElementById('img-task-body').innerHTML =
       '<tr><td colspan="4">请先选择目标服务器。</td></tr>';
     return;
@@ -2524,21 +2737,24 @@ async function loadImages() {
   const data = await api(`/api/images?server_id=${encodeURIComponent(serverId)}`);
   const tbody = document.getElementById('img-table-body');
   if (data.error) {
-    tbody.innerHTML = `<tr><td colspan="5">读取失败：${escapeHtml(data.error)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7">读取失败：${escapeHtml(data.error)}</td></tr>`;
     return;
   }
   const images = data.images || [];
+  cacheImageCatalog(serverId, images);
   if (!images.length) {
-    tbody.innerHTML = '<tr><td colspan="5">该服务器尚未下载镜像。</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7">该服务器尚未下载镜像。</td></tr>';
     return;
   }
   tbody.innerHTML = images.map(image => `
     <tr>
-      <td class="td-hi">${escapeHtml(image.Repository)}</td>
-      <td>${escapeHtml(image.Tag)}</td>
-      <td class="td-mono">${escapeHtml(image.ID)}</td>
-      <td>${escapeHtml(image.CreatedSince)}</td>
-      <td>${escapeHtml(image.Size)}</td>
+      <td class="td-hi">${escapeHtml(getImageDisplayName(image))}</td>
+      <td>${escapeHtml(getImageKindText(image))}</td>
+      <td>${escapeHtml(image.backup_source_container || '—')}</td>
+      <td class="td-mono">${escapeHtml(image.ID || '—')}</td>
+      <td>${escapeHtml(image.CreatedSince || ((image.CreatedAt || '').slice(0, 19).replace('T', ' ')) || '—')}</td>
+      <td>${escapeHtml(image.Size || formatBytesCompact(image.SizeBytes || 0))}</td>
+      <td><button class="btn btn-danger" onclick="deleteImage('${escapeHtml(serverId)}', '${escapeHtml(getImageReference(image))}')">删除</button></td>
     </tr>`).join('');
 }
 
@@ -2595,6 +2811,25 @@ async function startImagePull() {
     loadAuditLogs();
   } else {
     toast(res.error || '镜像拉取启动失败', 'danger');
+  }
+}
+
+async function deleteImage(serverId, imageRef) {
+  if (!serverId || !imageRef) {
+    toast('缺少镜像标识', 'warn');
+    return;
+  }
+  if (!confirm(`确认删除镜像 ${imageRef}？`)) return;
+  const res = await api('/api/images', {
+    method: 'DELETE',
+    body: JSON.stringify({ server_id: serverId, image_ref: imageRef })
+  });
+  if (res.ok) {
+    toast('镜像已删除', 'warn');
+    loadImages();
+    loadAuditLogs();
+  } else {
+    toast(res.error || '镜像删除失败', 'danger');
   }
 }
 
@@ -2657,7 +2892,159 @@ async function createContainer() {
   }
 }
 
-function openContainerResourceModal(id) {
+function renderEditContainerGpuOptions(devices, selectedDevices = []) {
+  const container = document.getElementById('edit-ctr-gpu-options');
+  if (!devices.length) {
+    container.innerHTML = '<div class="form-hint">当前服务器未返回可用 GPU 列表。</div>';
+    return;
+  }
+  const selected = new Set(normalizeGpuDeviceIds(selectedDevices));
+  container.innerHTML = devices.map(device => {
+    const index = String(device.index ?? '');
+    const totalGb = formatBytesCompact(device.memory_total_bytes || 0);
+    const usedGb = formatBytesCompact(device.memory_used_bytes || 0);
+    const checked = selected.has(index) ? 'checked' : '';
+    return `<label class="gpu-check-row">
+      <input type="checkbox" class="edit-ctr-gpu-device" value="${escapeHtml(index)}" ${checked}>
+      <span class="gpu-check-main">
+        <span class="gpu-check-name">GPU ${escapeHtml(index)} · ${escapeHtml(device.name || 'Unknown')}</span>
+        <span class="gpu-check-meta">显存 ${escapeHtml(usedGb)} / ${escapeHtml(totalGb)} · 当前利用率 ${escapeHtml(String(device.utilization_gpu ?? 0))}%</span>
+      </span>
+      <span class="badge badge-info">${escapeHtml(index)}</span>
+    </label>`;
+  }).join('');
+}
+
+function getSelectedEditContainerGpuDevices() {
+  return [...document.querySelectorAll('#edit-ctr-gpu-options .edit-ctr-gpu-device:checked')].map(input => input.value);
+}
+
+function setAllEditContainerGpuDevices(checked) {
+  document.querySelectorAll('#edit-ctr-gpu-options .edit-ctr-gpu-device').forEach(input => {
+    input.checked = checked;
+  });
+}
+
+function toggleEditContainerGpuFields() {
+  const enabled = document.getElementById('edit-ctr-gpu-enabled').checked && !document.getElementById('edit-ctr-gpu-enabled').disabled;
+  const options = document.querySelectorAll('#edit-ctr-gpu-options .edit-ctr-gpu-device');
+  options.forEach(input => {
+    input.disabled = !enabled;
+  });
+  if (enabled && options.length && !getSelectedEditContainerGpuDevices().length) {
+    setAllEditContainerGpuDevices(true);
+  }
+}
+
+function toggleRebuildSourceFields() {
+  const source = document.getElementById('edit-ctr-rebuild-source').value;
+  document.getElementById('edit-ctr-rebuild-image-field').style.display = source === 'backup_image' ? 'block' : 'none';
+  document.getElementById('edit-ctr-rebuild-hint').textContent = source === 'backup_image'
+    ? '将直接使用选中的手动备份镜像重建容器，备份镜像本身不会自动删除。'
+    : '将先生成一次临时快照镜像，再按当前容器状态重建；临时快照完成后自动删除。';
+}
+
+function populateRebuildBackupImages(serverId, currentContainerName = '') {
+  const select = document.getElementById('edit-ctr-rebuild-image');
+  const backups = [...getManualBackupImages(serverId)].sort((a, b) => {
+    const aSelf = a.backup_source_container === currentContainerName ? 0 : 1;
+    const bSelf = b.backup_source_container === currentContainerName ? 0 : 1;
+    if (aSelf !== bSelf) return aSelf - bSelf;
+    return String(b.CreatedAt || '').localeCompare(String(a.CreatedAt || ''));
+  });
+  if (!backups.length) {
+    select.innerHTML = '<option value="">-- 当前服务器暂无手动备份镜像 --</option>';
+    return;
+  }
+  select.innerHTML = '<option value="">-- 选择手动备份镜像 --</option>' + backups.map(image => {
+    const sourceText = image.backup_source_container ? ` / 来源 ${image.backup_source_container}` : '';
+    const sizeText = image.Size || formatBytesCompact(image.SizeBytes || 0);
+    return `<option value="${escapeHtml(getImageReference(image))}">${escapeHtml(getImageDisplayName(image))}${escapeHtml(sourceText)} / ${escapeHtml(sizeText)}</option>`;
+  }).join('');
+}
+
+async function loadEditContainerCapabilities(container) {
+  const gpuCheckbox = document.getElementById('edit-ctr-gpu-enabled');
+  const gpuHint = document.getElementById('edit-ctr-gpu-hint');
+  const rootfsInput = document.getElementById('edit-ctr-rootfs-limit');
+  const rootfsHint = document.getElementById('edit-ctr-rootfs-hint');
+  const defaults = await api(`/api/servers/${container.server}/defaults`);
+  if (!defaults.ok) {
+    throw new Error(defaults.error || '服务器能力读取失败');
+  }
+  const server = STATE.servers.find(item => item.id === container.server);
+  if (server) {
+    server.checks = defaults.checks || server.checks || {};
+    server.mount_roots = defaults.mount_roots || server.mount_roots || [];
+  }
+  const storage = defaults.storage || {};
+  const gpu = defaults.gpu || {};
+  const defaultRootfsLimit = defaults.default_rootfs_limit || '120g';
+
+  if (storage.supports_rootfs_limit) {
+    rootfsInput.disabled = false;
+    rootfsInput.value = container.rootfs_limit || defaultRootfsLimit;
+    rootfsHint.textContent = '只限制容器自身系统层写入，不限制挂载目录、数据盘或 Docker volume。';
+  } else {
+    rootfsInput.disabled = true;
+    rootfsInput.value = container.rootfs_limit || '';
+    rootfsHint.textContent = storage.reason
+      ? `当前服务器不支持容器可写层磁盘上限：${storage.reason}`
+      : '当前服务器不支持容器可写层磁盘上限。';
+  }
+
+  gpuCheckbox.checked = Boolean(container.gpu_enabled);
+  if (gpu.supported) {
+    const devices = gpu.devices || [];
+    gpuCheckbox.disabled = false;
+    gpuHint.textContent = devices.length
+      ? `检测到 ${devices.length} 张 GPU。启用后默认可调整当前容器可访问的 GPU 列表。`
+      : '检测到 GPU 能力，但当前未返回可分配设备。';
+    const selectedDevices = normalizeGpuDeviceIds(container.gpu_devices || []);
+    renderEditContainerGpuOptions(devices, selectedDevices);
+    if (gpuCheckbox.checked && !selectedDevices.length) {
+      setAllEditContainerGpuDevices(true);
+    }
+  } else {
+    gpuCheckbox.disabled = true;
+    const firstMissing = (gpu.missing || [])[0];
+    gpuHint.textContent = firstMissing
+      ? `当前服务器不支持 GPU 容器变更：${firstMissing}`
+      : '当前服务器未满足 GPU 容器运行条件。';
+    const configured = normalizeGpuDeviceIds(container.gpu_devices || []);
+    if (configured.length) {
+      renderEditContainerGpuOptions(
+        configured.map(id => ({ index: id, name: '当前配置', memory_total_bytes: 0, memory_used_bytes: 0, utilization_gpu: 0 })),
+        configured
+      );
+    } else {
+      document.getElementById('edit-ctr-gpu-options').innerHTML = '<div class="form-hint">当前容器未启用 GPU。</div>';
+    }
+  }
+
+  toggleEditContainerGpuFields();
+}
+
+async function loadContainerBackupPreview(container) {
+  const data = await api(`/api/containers/${container.id}/backup-preview`);
+  if (!data.ok) {
+    document.getElementById('edit-ctr-backup-rw').textContent = '—';
+    document.getElementById('edit-ctr-backup-base').textContent = '—';
+    document.getElementById('edit-ctr-backup-estimated').textContent = '—';
+    document.getElementById('edit-ctr-backup-hint').textContent = `大小预估读取失败：${data.error || 'unknown error'}`;
+    return;
+  }
+  document.getElementById('edit-ctr-backup-rw').textContent = data.estimated_writable_text || formatBytesCompact(data.estimated_writable_bytes || 0);
+  document.getElementById('edit-ctr-backup-base').textContent = data.current_image_size_text || formatBytesCompact(data.current_image_size_bytes || 0);
+  document.getElementById('edit-ctr-backup-estimated').textContent = data.estimated_image_text || formatBytesCompact(data.estimated_image_bytes || 0);
+  document.getElementById('edit-ctr-backup-hint').textContent = '预估值基于容器当前可写层大小与当前镜像大小计算，实际结果可能略有浮动。';
+  const input = document.getElementById('edit-ctr-backup-image-name');
+  if (!input.value.trim()) {
+    input.value = data.suggested_image_name || '';
+  }
+}
+
+async function openContainerResourceModal(id) {
   const container = STATE.containers.find(item => item.id === id);
   if (!container) {
     toast('未找到容器信息，请先刷新列表', 'danger');
@@ -2673,10 +3060,45 @@ function openContainerResourceModal(id) {
   document.getElementById('edit-ctr-resource-current-cpu').textContent = container.cpu_limit || '1';
   document.getElementById('edit-ctr-resource-current-mem').textContent = container.mem_limit || '1g';
   document.getElementById('edit-ctr-resource-current-pids').textContent = String(container.pids_limit || 512);
+  document.getElementById('edit-ctr-resource-current-gpu').textContent = container.gpu_enabled
+    ? (normalizeGpuDeviceIds(container.gpu_devices || []).join(',') || '已启用')
+    : '未启用';
+  document.getElementById('edit-ctr-resource-current-rootfs').textContent = container.rootfs_limit || '未限制';
   document.getElementById('edit-ctr-resource-cpu').value = container.cpu_limit || '1';
   document.getElementById('edit-ctr-resource-mem').value = container.mem_limit || '1g';
   document.getElementById('edit-ctr-resource-pids').value = container.pids_limit || 512;
+  document.getElementById('edit-ctr-rootfs-limit').value = container.rootfs_limit || '120g';
+  document.getElementById('edit-ctr-gpu-enabled').checked = Boolean(container.gpu_enabled);
+  document.getElementById('edit-ctr-gpu-enabled').disabled = true;
+  document.getElementById('edit-ctr-gpu-hint').textContent = '读取服务器 GPU 能力中...';
+  document.getElementById('edit-ctr-gpu-options').innerHTML = '<div class="form-hint">读取 GPU 列表中...</div>';
+  document.getElementById('edit-ctr-rootfs-hint').textContent = '读取服务器存储能力中...';
+  document.getElementById('edit-ctr-rebuild-source').value = 'temporary_snapshot';
+  document.getElementById('edit-ctr-rebuild-image').innerHTML = '<option value="">-- 正在读取备份镜像 --</option>';
+  document.getElementById('edit-ctr-backup-image-name').value = '';
+  document.getElementById('edit-ctr-backup-rw').textContent = '加载中...';
+  document.getElementById('edit-ctr-backup-base').textContent = '加载中...';
+  document.getElementById('edit-ctr-backup-estimated').textContent = '加载中...';
+  document.getElementById('edit-ctr-backup-hint').textContent = '正在读取容器可写层大小与镜像大小预估。';
+  toggleRebuildSourceFields();
   openModal('modal-edit-ctr-resource');
+
+  const imagePromise = ensureImageCatalog(container.server)
+    .then(() => populateRebuildBackupImages(container.server, container.name))
+    .catch(error => {
+      document.getElementById('edit-ctr-rebuild-image').innerHTML = '<option value="">-- 读取手动备份镜像失败 --</option>';
+      toast(error.message || '镜像列表读取失败', 'warn');
+    });
+
+  try {
+    await Promise.all([
+      loadEditContainerCapabilities(container),
+      loadContainerBackupPreview(container),
+      imagePromise
+    ]);
+  } catch (error) {
+    toast(error.message || '容器更新信息读取失败', 'danger');
+  }
 }
 
 async function saveContainerResources() {
@@ -2700,7 +3122,7 @@ async function saveContainerResources() {
     body: JSON.stringify({ cpu_limit: cpu, mem_limit: mem, pids_limit: pids })
   });
   submitBtn.disabled = false;
-  submitBtn.textContent = '保存修改';
+  submitBtn.textContent = '保存在线修改';
   if (res.ok) {
     closeModal('modal-edit-ctr-resource');
     toast('资源配置已更新', 'ok');
@@ -2709,6 +3131,112 @@ async function saveContainerResources() {
     loadAuditLogs();
   } else {
     toast(res.error || '资源更新失败', 'danger');
+  }
+}
+
+async function backupContainerImage() {
+  if (!STATE.editingContainerId) {
+    toast('未找到要备份的容器', 'danger');
+    return;
+  }
+  const container = STATE.containers.find(item => item.id === STATE.editingContainerId);
+  if (!container) {
+    toast('容器信息已过期，请刷新后重试', 'danger');
+    return;
+  }
+  const imageName = document.getElementById('edit-ctr-backup-image-name').value.trim();
+  const submitBtn = document.getElementById('edit-ctr-backup-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '备份中...';
+  const res = await api(`/api/containers/${STATE.editingContainerId}/backup-image`, {
+    method: 'POST',
+    body: JSON.stringify({ image_name: imageName })
+  });
+  submitBtn.disabled = false;
+  submitBtn.textContent = '备份为镜像';
+  if (res.ok) {
+    document.getElementById('edit-ctr-backup-hint').textContent = `已生成镜像 ${res.image_ref || ''}，实际大小 ${res.size_text || formatBytesCompact(res.size_bytes || 0)}。`;
+    toast('容器已备份为镜像', 'ok');
+    try {
+      await ensureImageCatalog(container.server);
+      populateRebuildBackupImages(container.server, container.name);
+    } catch (error) {
+      toast(error.message || '备份镜像列表刷新失败', 'warn');
+    }
+    if (document.getElementById('img-server').value === container.server) {
+      loadImages();
+    }
+    loadAuditLogs();
+  } else {
+    toast(res.error || '容器备份失败', 'danger');
+  }
+}
+
+async function rebuildContainer() {
+  if (!STATE.editingContainerId) {
+    toast('未找到要重建的容器', 'danger');
+    return;
+  }
+  const container = STATE.containers.find(item => item.id === STATE.editingContainerId);
+  if (!container) {
+    toast('容器信息已过期，请刷新后重试', 'danger');
+    return;
+  }
+  const sourceType = document.getElementById('edit-ctr-rebuild-source').value;
+  const imageRef = document.getElementById('edit-ctr-rebuild-image').value;
+  const gpuCheckbox = document.getElementById('edit-ctr-gpu-enabled');
+  const rootfsInput = document.getElementById('edit-ctr-rootfs-limit');
+  const gpuEnabled = gpuCheckbox.disabled ? Boolean(container.gpu_enabled) : gpuCheckbox.checked;
+  const gpuDevices = gpuCheckbox.disabled
+    ? normalizeGpuDeviceIds(container.gpu_devices || [])
+    : getSelectedEditContainerGpuDevices();
+  const rootfsLimit = rootfsInput.disabled ? (container.rootfs_limit || '') : rootfsInput.value.trim();
+  const cpu = document.getElementById('edit-ctr-resource-cpu').value.trim() || container.cpu_limit || '1';
+  const mem = document.getElementById('edit-ctr-resource-mem').value.trim() || container.mem_limit || '1g';
+  const pidsValue = document.getElementById('edit-ctr-resource-pids').value.trim();
+  const pids = parseInt(pidsValue || String(container.pids_limit || 512), 10);
+
+  if (Number.isNaN(pids) || pids <= 0) {
+    toast('PIDs 限制必须是大于 0 的整数', 'warn');
+    return;
+  }
+  if (gpuEnabled && !gpuDevices.length) {
+    toast('已启用 GPU，请至少选择一张 GPU', 'warn');
+    return;
+  }
+  if (sourceType === 'backup_image' && !imageRef) {
+    toast('请选择一个手动备份镜像', 'warn');
+    return;
+  }
+  if (!confirm(`确认重建容器 ${container.name} 并应用 GPU / 磁盘上限变更？`)) return;
+
+  const submitBtn = document.getElementById('edit-ctr-rebuild-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '重建中...';
+  const res = await api(`/api/containers/${STATE.editingContainerId}/rebuild`, {
+    method: 'POST',
+    body: JSON.stringify({
+      cpu_limit: cpu,
+      mem_limit: mem,
+      pids_limit: pids,
+      gpu_enabled: gpuEnabled,
+      gpu_devices: gpuEnabled ? gpuDevices : [],
+      gpu_mode: gpuEnabled ? 'shared' : '',
+      rootfs_limit: rootfsLimit,
+      source_type: sourceType,
+      image_ref: sourceType === 'backup_image' ? imageRef : ''
+    })
+  });
+  submitBtn.disabled = false;
+  submitBtn.textContent = '重建并应用变更';
+  if (res.ok) {
+    closeModal('modal-edit-ctr-resource');
+    toast(res.rollback_warning ? `容器已重建，但旧容器清理失败：${res.rollback_warning}` : '容器重建完成', res.rollback_warning ? 'warn' : 'ok');
+    loadContainers();
+    loadOverview();
+    loadAuditLogs();
+  } else {
+    toast(res.error || '容器重建失败', 'danger');
   }
 }
 
