@@ -799,6 +799,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   display: flex;
   flex-direction: column;
   gap: 6px;
+  align-items: flex-start;
 }
 
 .server-check-line {
@@ -2480,7 +2481,7 @@ function renderServerCheckCell(server) {
 
   const head = warnings
     ? `<span class="badge badge-warn">${warnings} 警告</span>`
-    : statusBadge(server.status);
+    : '<span class="badge badge-info">已检查</span>';
 
   return `<div class="server-check-cell">${head}${lines.join('')}</div>`;
 }
