@@ -1048,7 +1048,7 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
           <div class="stat-card c-purple">
             <div class="stat-label">平台用户</div>
             <div class="stat-value" id="ov-usr">—</div>
-            <div class="stat-sub">管理员 + 分配员</div>
+            <div class="stat-sub">管理人员</div>
             <div class="stat-icon">◉</div>
           </div>
           <div class="stat-card c-warn">
@@ -1180,12 +1180,63 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
           <div class="page-breadcrumb">DockerHub / <span>镜像库</span></div>
           <div class="page-title">镜像管理</div>
         </div>
+        <div class="page-actions">
+          <button class="btn" onclick="loadImagesPanel()">刷新</button>
+        </div>
       </div>
       <div class="content-area">
-        <div class="empty-state" style="margin-top:60px">
-          <div class="empty-icon">◧</div>
-          <div class="empty-title">镜像管理</div>
-          <div class="empty-sub">请先添加服务器，Agent 连通后可查看各服务器已下载镜像并拉取新镜像</div>
+        <div class="table-wrap" style="margin-bottom:18px">
+          <div class="table-header">
+            <div class="table-title">后台拉取镜像</div>
+          </div>
+          <div style="padding:16px">
+            <div class="form-row">
+              <div class="form-field">
+                <label class="form-label">目标服务器</label>
+                <select class="form-select" id="img-server" onchange="loadImagesPanel()">
+                  <option value="">-- 选择服务器 --</option>
+                </select>
+              </div>
+              <div class="form-field">
+                <label class="form-label">镜像源前缀（可选）</label>
+                <input class="form-input" id="img-registry" placeholder="企业代理或可用国内镜像源域名">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-field">
+                <label class="form-label">镜像地址</label>
+                <input class="form-input" id="img-reference" placeholder="ubuntu:22.04 或 linuxserver/openssh-server:latest">
+              </div>
+              <div class="form-field" style="display:flex;align-items:flex-end">
+                <button class="btn btn-primary" onclick="startImagePull()">开始后台拉取</button>
+              </div>
+            </div>
+            <div class="form-hint">镜像源前缀只影响本次拉取，不修改 Docker daemon 配置。例如填写企业自建代理域名后，ubuntu:22.04 会按 代理域名/ubuntu:22.04 拉取。</div>
+          </div>
+        </div>
+
+        <div class="table-wrap" style="margin-bottom:18px">
+          <div class="table-header">
+            <div class="table-title">拉取任务</div>
+          </div>
+          <table>
+            <thead>
+              <tr><th>镜像</th><th>状态</th><th>开始时间</th><th>最近进度</th></tr>
+            </thead>
+            <tbody id="img-task-body"></tbody>
+          </table>
+        </div>
+
+        <div class="table-wrap">
+          <div class="table-header">
+            <div class="table-title">已下载镜像</div>
+          </div>
+          <table>
+            <thead>
+              <tr><th>仓库</th><th>标签</th><th>镜像 ID</th><th>创建时间</th><th>大小</th></tr>
+            </thead>
+            <tbody id="img-table-body"></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -1252,8 +1303,8 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
     <div class="modal-body">
       <div class="form-row">
         <div class="form-field">
-          <label class="form-label">容器名称</label>
-          <input class="form-input" type="text" id="ctr-name" placeholder="user_alice_env">
+          <label class="form-label">容器名称（可选）</label>
+          <input class="form-input" type="text" id="ctr-name" placeholder="留空自动生成">
         </div>
         <div class="form-field">
           <label class="form-label">分配给（使用者标识）</label>
@@ -1279,7 +1330,12 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
         </div>
         <div class="form-field">
           <label class="form-label">镜像</label>
-          <input class="form-input" type="text" id="ctr-image" placeholder="lscr.io/linuxserver/openssh-server:latest" value="lscr.io/linuxserver/openssh-server:latest">
+          <select class="form-select" id="ctr-image-select">
+            <option value="">-- 选择服务器后读取镜像 --</option>
+            <option value="__custom__">手动输入其他镜像</option>
+          </select>
+          <input class="form-input" type="text" id="ctr-image-custom" placeholder="lscr.io/linuxserver/openssh-server:latest" value="lscr.io/linuxserver/openssh-server:latest" style="display:none;margin-top:8px">
+          <div class="form-hint" id="ctr-image-hint">选择目标服务器后自动读取该服务器已下载镜像。</div>
         </div>
       </div>
       <div class="form-field">
@@ -1303,9 +1359,9 @@ td.td-mono { font-family: var(--mono); font-size: 11px; }
         </div>
       </div>
       <div class="form-field">
-        <label class="form-label">SSH 端口（宿主机）</label>
-        <input class="form-input" type="number" id="ctr-port" placeholder="32001" value="32001">
-        <div class="form-hint">使用者将通过此端口直连 Docker。约定范围：32000-32999，请确保端口未被占用。</div>
+        <label class="form-label">SSH 端口（宿主机，可留空）</label>
+        <input class="form-input" type="number" id="ctr-port" placeholder="留空自动分配">
+        <div class="form-hint">留空时自动从 32000-32999 选择空闲端口；手动填写时必须位于该范围且未被占用。</div>
       </div>
       <div class="form-field">
         <label class="form-label">已注册挂载目录</label>
@@ -1432,8 +1488,13 @@ const STATE = {
   servers: [],
   containers: [],
   users: [],
-  editingServerId: null
+  containerImages: {},
+  editingServerId: null,
+  imageTaskTimer: null,
+  finishedImageTasks: {}
 };
+
+const DEFAULT_CONTAINER_IMAGE = 'lscr.io/linuxserver/openssh-server:latest';
 
 /* ═══════════════════════════════════════════════
    CLOCK
@@ -1475,6 +1536,7 @@ function switchPanel(name) {
 
   if (name === 'containers') loadContainers();
   if (name === 'servers')    loadServers();
+  if (name === 'images')     loadImagesPanel();
   if (name === 'users')      loadUsers();
   if (name === 'audit')      loadAuditLogs();
 }
@@ -1488,15 +1550,22 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) closeModal(el.id); });
 });
 
-document.getElementById('ctr-server').addEventListener('change', loadSelectedServerDefaults);
+document.getElementById('ctr-server').addEventListener('change', loadCreateContainerServerData);
+document.getElementById('ctr-image-select').addEventListener('change', toggleCustomContainerImage);
 
 async function openCreateContainerModal() {
   openModal('modal-create-ctr');
+  document.getElementById('ssh-result').style.display = 'none';
+  document.getElementById('ssh-cmd-text').textContent = '';
   const select = document.getElementById('ctr-server');
   if (!select.value && STATE.servers.length === 1) {
     select.value = STATE.servers[0].id;
   }
-  await loadSelectedServerDefaults();
+  await loadCreateContainerServerData();
+}
+
+async function loadCreateContainerServerData() {
+  await Promise.all([loadSelectedServerDefaults(), loadSelectedServerImages()]);
 }
 
 async function loadSelectedServerDefaults() {
@@ -1528,6 +1597,80 @@ async function loadSelectedServerDefaults() {
     }
     toast(error.message || '服务器挂载目录读取失败', 'danger');
   }
+}
+
+function normalizeImageReference(image) {
+  const repository = (image && image.Repository) || '';
+  const tag = (image && image.Tag) || '';
+  if (!repository || repository === '<none>') return '';
+  if (!tag || tag === '<none>') return repository;
+  return `${repository}:${tag}`;
+}
+
+function toggleCustomContainerImage() {
+  const select = document.getElementById('ctr-image-select');
+  document.getElementById('ctr-image-custom').style.display = select.value === '__custom__' ? 'block' : 'none';
+}
+
+function getSelectedContainerImage() {
+  const select = document.getElementById('ctr-image-select');
+  if (select.value === '__custom__') {
+    return document.getElementById('ctr-image-custom').value.trim();
+  }
+  return select.value.trim();
+}
+
+function populateContainerImageSelect(images, preferredValue = '') {
+  const select = document.getElementById('ctr-image-select');
+  const customInput = document.getElementById('ctr-image-custom');
+  const currentValue = preferredValue || getSelectedContainerImage() || customInput.value.trim();
+  const uniqueImages = [...new Set((images || []).filter(Boolean))];
+  select.innerHTML = '<option value="">-- 选择镜像 --</option>' +
+    uniqueImages.map(image => `<option value="${escapeHtml(image)}">${escapeHtml(image)}</option>`).join('') +
+    '<option value="__custom__">手动输入其他镜像</option>';
+  if (currentValue && uniqueImages.includes(currentValue)) {
+    select.value = currentValue;
+  } else if (currentValue) {
+    select.value = '__custom__';
+    customInput.value = currentValue;
+  } else if (uniqueImages.includes(DEFAULT_CONTAINER_IMAGE)) {
+    select.value = DEFAULT_CONTAINER_IMAGE;
+  } else if (uniqueImages.length) {
+    select.value = uniqueImages[0];
+  } else {
+    select.value = '__custom__';
+    customInput.value = DEFAULT_CONTAINER_IMAGE;
+  }
+  toggleCustomContainerImage();
+}
+
+async function loadSelectedServerImages() {
+  const sid = document.getElementById('ctr-server').value;
+  const hint = document.getElementById('ctr-image-hint');
+  if (!sid) {
+    populateContainerImageSelect([], '');
+    hint.textContent = '选择目标服务器后自动读取该服务器已下载镜像。';
+    return;
+  }
+  const cachedImages = STATE.containerImages[sid] || [];
+  if (cachedImages.length) {
+    populateContainerImageSelect(cachedImages);
+    hint.textContent = `已读取 ${cachedImages.length} 个镜像，可直接下拉选择。`;
+  } else {
+    hint.textContent = '正在读取该服务器已下载镜像...';
+  }
+  const data = await api(`/api/images?server_id=${encodeURIComponent(sid)}`);
+  if (data.error) {
+    populateContainerImageSelect(cachedImages);
+    hint.textContent = `镜像读取失败：${data.error}`;
+    return;
+  }
+  const images = [...new Set((data.images || []).map(normalizeImageReference).filter(Boolean))];
+  STATE.containerImages[sid] = images;
+  populateContainerImageSelect(images);
+  hint.textContent = images.length
+    ? `已读取 ${images.length} 个镜像，可直接下拉选择。`
+    : '该服务器尚未下载镜像，可手动输入或先去镜像库拉取。';
 }
 
 function togglePasswordAccess() {
@@ -1653,7 +1796,7 @@ async function loadOverview() {
   document.getElementById('ov-srv').textContent = srvCnt;
   document.getElementById('ov-ctr').textContent = ctrCnt;
   document.getElementById('srv-count').textContent = `${srvCnt} 台服务器`;
-  document.getElementById('ctr-count').textContent = `${ctrCnt} 个容器运行中`;
+  document.getElementById('ctr-count').textContent = `${ctrCnt} 个容器`;
   document.getElementById('badge-srv').textContent = srvCnt;
   document.getElementById('badge-ctr').textContent = ctrCnt;
 
@@ -1685,6 +1828,7 @@ async function loadOverview() {
   if (STATE.servers.some(server => server.id === selectedServer)) {
     sel.value = selectedServer;
   }
+  populateImageServerSelect();
 
   const onlinePercent = srvCnt ? STATE.servers.filter(s => s.status === 'online').length / srvCnt * 100 : 0;
   document.getElementById('load-val').textContent = onlinePercent.toFixed(0) + '%';
@@ -1712,7 +1856,9 @@ async function loadContainers() {
       <td style="font-size:11px;color:var(--text-lo)">${c.created_at ? c.created_at.slice(0,16) : '—'}</td>
       <td>${statusBadge(c.status)}</td>
       <td>
-        <button class="btn" onclick="updateResources('${c.id}', '${c.cpu_limit || ''}', '${c.mem_limit || ''}', '${c.pids_limit || 512}')">资源</button>
+        ${c.status === 'missing'
+          ? '<span style="font-size:11px;color:var(--text-lo)">已失联</span>'
+          : `<button class="btn" onclick="updateResources('${c.id}', '${c.cpu_limit || ''}', '${c.mem_limit || ''}', '${c.pids_limit || 512}')">资源</button>`}
         <button class="btn btn-danger" onclick="delContainer('${c.id}')">删除</button>
       </td>
     </tr>`).join('');
@@ -1730,6 +1876,10 @@ async function loadServers() {
     </div></td></tr>`;
     return;
   }
+  const containerCountMap = STATE.containers.reduce((acc, item) => {
+    acc[item.server] = (acc[item.server] || 0) + 1;
+    return acc;
+  }, {});
   tbody.innerHTML = STATE.servers.map(s => `
     <tr>
       <td class="td-hi">${s.name}</td>
@@ -1737,7 +1887,7 @@ async function loadServers() {
       <td class="td-mono">${s.agent_port || 5001}</td>
       <td class="td-mono">${(s.mount_roots || []).map(r => r.host_path).join('<br>') || '—'}</td>
       <td>${(s.checks && s.checks.warnings && s.checks.warnings.length) ? `<span class="badge badge-warn">${s.checks.warnings.length} 警告</span>` : statusBadge(s.status)}</td>
-      <td><span class="badge badge-info">${s.containers} 个</span></td>
+      <td><span class="badge badge-info">${containerCountMap[s.id] ?? s.containers} 个</span></td>
       <td>${statusBadge(s.status)}</td>
       <td>
         <button class="btn" onclick="editServer('${s.id}')">编辑</button>
@@ -1769,7 +1919,10 @@ async function loadUsers() {
 function statusBadge(s) {
   const map = {
     running: 'badge-ok',
+    done:    'badge-ok',
     stopped: 'badge-warn',
+    missing: 'badge-danger',
+    unknown: 'badge-gray',
     error:   'badge-danger',
     online:  'badge-ok',
     offline: 'badge-danger'
@@ -1783,20 +1936,153 @@ function roleBadge(r) {
 }
 
 /* ═══════════════════════════════════════════════
+   IMAGES
+═══════════════════════════════════════════════ */
+function populateImageServerSelect() {
+  const select = document.getElementById('img-server');
+  if (!select) return;
+  const selected = select.value;
+  select.innerHTML = '<option value="">-- 选择服务器 --</option>' +
+    STATE.servers.map(server =>
+      `<option value="${escapeHtml(server.id)}">${escapeHtml(server.name)} (${escapeHtml(server.host)})</option>`
+    ).join('');
+  if (STATE.servers.some(server => server.id === selected)) {
+    select.value = selected;
+  } else if (STATE.servers.length === 1) {
+    select.value = STATE.servers[0].id;
+  }
+}
+
+async function loadImagesPanel() {
+  populateImageServerSelect();
+  const serverId = document.getElementById('img-server').value;
+  if (!serverId) {
+    document.getElementById('img-table-body').innerHTML =
+      '<tr><td colspan="5">请先选择目标服务器。</td></tr>';
+    document.getElementById('img-task-body').innerHTML =
+      '<tr><td colspan="4">请先选择目标服务器。</td></tr>';
+    return;
+  }
+  await Promise.all([loadImages(), loadImageTasks()]);
+  if (!STATE.imageTaskTimer) {
+    STATE.imageTaskTimer = setInterval(() => {
+      if (document.getElementById('panel-images').classList.contains('active')) {
+        loadImageTasks();
+      }
+    }, 2000);
+  }
+}
+
+async function loadImages() {
+  const serverId = document.getElementById('img-server').value;
+  if (!serverId) return;
+  const data = await api(`/api/images?server_id=${encodeURIComponent(serverId)}`);
+  const tbody = document.getElementById('img-table-body');
+  if (data.error) {
+    tbody.innerHTML = `<tr><td colspan="5">读取失败：${escapeHtml(data.error)}</td></tr>`;
+    return;
+  }
+  const images = data.images || [];
+  if (!images.length) {
+    tbody.innerHTML = '<tr><td colspan="5">该服务器尚未下载镜像。</td></tr>';
+    return;
+  }
+  tbody.innerHTML = images.map(image => `
+    <tr>
+      <td class="td-hi">${escapeHtml(image.Repository)}</td>
+      <td>${escapeHtml(image.Tag)}</td>
+      <td class="td-mono">${escapeHtml(image.ID)}</td>
+      <td>${escapeHtml(image.CreatedSince)}</td>
+      <td>${escapeHtml(image.Size)}</td>
+    </tr>`).join('');
+}
+
+async function loadImageTasks() {
+  const serverId = document.getElementById('img-server').value;
+  if (!serverId) return;
+  const data = await api(`/api/images/tasks?server_id=${encodeURIComponent(serverId)}`);
+  const tasks = data.tasks || [];
+  const tbody = document.getElementById('img-task-body');
+  if (!tasks.length) {
+    tbody.innerHTML = '<tr><td colspan="4">暂无镜像拉取任务。</td></tr>';
+    return;
+  }
+  tbody.innerHTML = tasks.map(task => {
+    const progress = (task.progress || []).slice(-4).join('\n') || '等待 Agent 返回进度...';
+    return `<tr>
+      <td class="td-mono">${escapeHtml(task.image)}</td>
+      <td>${statusBadge(task.status)}</td>
+      <td>${escapeHtml((task.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+      <td><div class="td-mono" style="white-space:pre-wrap;font-size:11px">${escapeHtml(progress)}</div></td>
+    </tr>`;
+  }).join('');
+  tasks.forEach(task => {
+    if ((task.status === 'done' || task.status === 'error') && !STATE.finishedImageTasks[task.id]) {
+      STATE.finishedImageTasks[task.id] = true;
+      loadImages();
+      loadAuditLogs();
+    }
+  });
+}
+
+async function startImagePull() {
+  const serverId = document.getElementById('img-server').value;
+  const image = document.getElementById('img-reference').value.trim();
+  if (!serverId) {
+    toast('请先选择目标服务器', 'warn');
+    return;
+  }
+  if (!image) {
+    toast('请填写镜像地址', 'warn');
+    return;
+  }
+  const res = await api('/api/images/pull', {
+    method: 'POST',
+    body: JSON.stringify({
+      server_id: serverId,
+      image,
+      registry_prefix: document.getElementById('img-registry').value.trim()
+    })
+  });
+  if (res.ok) {
+    toast('镜像已进入后台拉取队列', 'ok');
+    loadImageTasks();
+    loadAuditLogs();
+  } else {
+    toast(res.error || '镜像拉取启动失败', 'danger');
+  }
+}
+
+/* ═══════════════════════════════════════════════
    ACTIONS
 ═══════════════════════════════════════════════ */
 async function createContainer() {
-  const loginUser = document.getElementById('ctr-login-user').value || document.getElementById('ctr-user').value;
+  const loginUser = (document.getElementById('ctr-login-user').value || document.getElementById('ctr-user').value).trim();
+  const serverId = document.getElementById('ctr-server').value;
+  const image = getSelectedContainerImage();
+  const portValue = document.getElementById('ctr-port').value.trim();
+  if (!serverId) {
+    toast('请先选择目标服务器', 'warn');
+    return;
+  }
+  if (!image) {
+    toast('请选择镜像，或手动填写镜像地址', 'warn');
+    return;
+  }
+  if (portValue && Number.isNaN(parseInt(portValue, 10))) {
+    toast('SSH 端口必须是数字，或留空自动分配', 'warn');
+    return;
+  }
   const body = {
-    name:        document.getElementById('ctr-name').value || 'docker_env',
-    assigned_to: document.getElementById('ctr-user').value,
+    name:        document.getElementById('ctr-name').value.trim(),
+    assigned_to: document.getElementById('ctr-user').value.trim(),
     login_user:  loginUser,
-    server_id:   document.getElementById('ctr-server').value,
-    image:       document.getElementById('ctr-image').value || 'lscr.io/linuxserver/openssh-server:latest',
+    server_id:   serverId,
+    image,
     cpu_limit:   document.getElementById('ctr-cpu').value || '2',
     mem_limit:   document.getElementById('ctr-mem').value || '8g',
     pids_limit:  parseInt(document.getElementById('ctr-pids').value) || 512,
-    ssh_port:    parseInt(document.getElementById('ctr-port').value) || 32001,
+    ssh_port:    portValue ? parseInt(portValue, 10) : null,
     ssh_public_key: document.getElementById('ctr-ssh-key').value,
     password_access: document.getElementById('ctr-password-access').checked,
     ssh_password: document.getElementById('ctr-ssh-password').value,
@@ -1804,7 +2090,7 @@ async function createContainer() {
   };
   const res = await api('/api/containers', { method: 'POST', body: JSON.stringify(body) });
   if (res.ok) {
-    toast('容器创建成功！', 'ok');
+    toast(res.recovered ? '已接管已存在容器并补回记录' : '容器创建成功！', 'ok');
     document.getElementById('ssh-cmd-text').textContent = res.ssh_cmd;
     document.getElementById('ssh-result').style.display = 'block';
     loadOverview(); loadAuditLogs();

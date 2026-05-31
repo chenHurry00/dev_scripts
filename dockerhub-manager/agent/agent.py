@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -21,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
+from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
 
@@ -67,6 +69,17 @@ def docker_available():
     code, out, _ = run("docker info --format '{{.ServerVersion}}'")
     return code == 0, out
 
+def find_available_ssh_port():
+    for port in range(SSH_PORT_MIN, SSH_PORT_MAX + 1):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    return None
+
 def memory_bytes():
     try:
         with open("/proc/meminfo", "r", encoding="utf-8") as f:
@@ -96,6 +109,53 @@ def safe_name(value, default="dockeruser"):
     value = value.strip("_-")
     return value or default
 
+def inspect_container_details(name):
+    code, out, err = run(["docker", "inspect", name, "--format", "{{json .}}"], timeout=20)
+    if code != 0:
+        return None, err or "容器不存在"
+    try:
+        raw = json.loads(out)
+    except ValueError:
+        return None, "docker inspect 返回无效 JSON"
+    labels = raw.get("Config", {}).get("Labels") or {}
+    ports = []
+    for container_port, bindings in (raw.get("NetworkSettings", {}).get("Ports") or {}).items():
+        for binding in bindings or []:
+            ports.append({
+                "container_port": container_port,
+                "host_ip": binding.get("HostIp", ""),
+                "host_port": binding.get("HostPort", ""),
+            })
+    state = raw.get("State", {}) or {}
+    ssh_port = ""
+    label_port = str(labels.get("manager.container_ssh_port") or "")
+    for port in ports:
+        if label_port and port["container_port"] == f"{label_port}/tcp":
+            ssh_port = port["host_port"]
+            break
+    if not ssh_port and ports:
+        ssh_port = ports[0]["host_port"]
+    return {
+        "id": raw.get("Id", ""),
+        "name": (raw.get("Name") or "").lstrip("/"),
+        "image": raw.get("Config", {}).get("Image", ""),
+        "status": state.get("Status", "unknown"),
+        "created_at": raw.get("Created", ""),
+        "labels": labels,
+        "ports": ports,
+        "ports_text": ", ".join(
+            f"{item['host_ip']}:{item['host_port']}->{item['container_port']}" for item in ports if item.get("host_port")
+        ),
+        "ssh_port": ssh_port,
+    }, None
+
+@app.errorhandler(Exception)
+def handle_exception(exc):
+    if isinstance(exc, HTTPException):
+        return exc
+    app.logger.exception("Unhandled exception")
+    return jsonify({"ok": False, "error": f"服务器内部错误: {exc}"}), 500
+
 def normalize_roots(raw):
     roots = []
     if not isinstance(raw, list):
@@ -122,6 +182,8 @@ def path_is_under(path, root):
 def validate_mounts(mounts, allowed_roots, puid, pgid):
     blocked_hosts = {"/", "/etc", "/proc", "/sys", "/var/run/docker.sock"}
     blocked_container_prefixes = ("/etc", "/bin", "/usr", "/proc", "/sys", "/var/run")
+    if not mounts:
+        return True, "", []
     roots = normalize_roots(allowed_roots)
     if not roots:
         return False, "服务器未配置允许挂载的宿主机目录", []
@@ -162,8 +224,13 @@ def validate_mounts(mounts, allowed_roots, puid, pgid):
         if not host_path_obj.exists():
             return False, f"宿主机路径不存在: {host_real}", []
         if created and not readonly:
-            os.chown(host_real, puid, pgid)
-            os.chmod(host_real, 0o770)
+            try:
+                os.chown(host_real, puid, pgid)
+                os.chmod(host_real, 0o770)
+            except PermissionError:
+                print(f"[WARN] 无权限设置目录所有者 {host_real}，跳过 chown/chmod")
+            except Exception as e:
+                print(f"[WARN] 设置目录权限失败 {host_real}: {e}")
 
         if matched_root.get("readonly"):
             readonly = True
@@ -212,6 +279,8 @@ def pull_image():
     """拉取镜像，SSE 流式返回进度"""
     body  = request.get_json(silent=True) or {}
     image = body.get("image", DEFAULT_SSH_IMAGE)
+    if not image or image.startswith("-") or any(ch.isspace() for ch in image):
+        return jsonify({"error": "镜像地址无效"}), 400
 
     def generate():
         proc = subprocess.Popen(
@@ -232,17 +301,20 @@ def pull_image():
 @app.route("/containers")
 @auth_required
 def list_containers():
-    code, out, err = run(
-        "docker ps -a --format '{{json .}}'"
-    )
     containers = []
-    if code == 0:
-        for line in out.splitlines():
-            try:
-                containers.append(json.loads(line))
-            except Exception:
-                pass
-    return jsonify({"containers": containers})
+    code, out, err = run("docker ps -a --filter label=manager=dockerhub --format '{{.Names}}'")
+    if code != 0:
+        return jsonify({"ok": False, "containers": [], "error": err}), 500
+    for name in out.splitlines():
+        name = name.strip()
+        if not name:
+            continue
+        details, inspect_error = inspect_container_details(name)
+        if details:
+            containers.append(details)
+        else:
+            print(f"[WARN] 读取容器详情失败 {name}: {inspect_error}")
+    return jsonify({"ok": True, "containers": containers})
 
 @app.route("/containers/create", methods=["POST"])
 @auth_required
@@ -262,13 +334,14 @@ def create_container():
     body     = request.get_json(silent=True) or {}
     name     = body.get("name", f"user_{int(time.time())}")
     image    = body.get("image", DEFAULT_SSH_IMAGE)
-    ssh_port = int(body.get("ssh_port", 32001))
+    raw_ssh_port = body.get("ssh_port")
     cpu      = str(body.get("cpu", "1"))
     memory   = str(body.get("memory", "1g"))
     pids_limit = int(body.get("pids_limit", 512))
     puid     = int(body.get("puid", 1000))
     pgid     = int(body.get("pgid", 1000))
     login_user = safe_name(body.get("login_user"), "dockeruser")
+    assigned_to = safe_name(body.get("assigned_to"), "")
     public_key = (body.get("ssh_public_key") or "").strip()
     password_access = bool(body.get("password_access", False))
     ssh_password = body.get("ssh_password", "")
@@ -276,11 +349,17 @@ def create_container():
     mounts   = body.get("mounts", [])
     allowed_roots = body.get("allowed_mount_roots", [])
 
-    if ssh_port < SSH_PORT_MIN or ssh_port > SSH_PORT_MAX:
-        return jsonify({
-            "ok": False,
-            "error": f"SSH 端口必须位于 {SSH_PORT_MIN}-{SSH_PORT_MAX}"
-        }), 400
+    ssh_port = None
+    if str(raw_ssh_port or "").strip():
+        try:
+            ssh_port = int(raw_ssh_port)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "SSH 端口必须是数字，或留空自动分配"}), 400
+        if ssh_port < SSH_PORT_MIN or ssh_port > SSH_PORT_MAX:
+            return jsonify({
+                "ok": False,
+                "error": f"SSH 端口必须位于 {SSH_PORT_MIN}-{SSH_PORT_MAX}"
+            }), 400
     if not valid_memory(memory):
         return jsonify({"ok": False, "error": "内存限制格式无效"}), 400
     try:
@@ -303,6 +382,15 @@ def create_container():
     ok, error, normalized_mounts = validate_mounts(mounts, allowed_roots, puid, pgid)
     if not ok:
         return jsonify({"ok": False, "error": error}), 400
+
+    existing, _ = inspect_container_details(name)
+    if existing:
+        return jsonify({
+            "ok": False,
+            "error": f"容器名称已存在: {name}",
+            "code": "container_name_conflict",
+            "existing": existing,
+        }), 409
 
     mount_args = []
     for m in normalized_mounts:
@@ -341,69 +429,108 @@ def create_container():
 
     container_ssh_port = 2222 if linuxserver_openssh else 22
     image_mode = "linuxserver-openssh" if linuxserver_openssh else "generic-bootstrap"
-    cmd = [
-        "docker", "run", "-d",
-        "--name",    name,
-        "-p",        f"{ssh_port}:{container_ssh_port}",
-        "--cpus",    cpu,
-        "--memory",  memory,
-        "--pids-limit", str(pids_limit),
-        "--security-opt", "no-new-privileges",
-        "--cap-drop", "NET_RAW",
-        "--label", "manager=dockerhub",
-        "--label", f"manager.login_user={login_user}",
-        "--label", f"manager.container_ssh_port={container_ssh_port}",
-        "--label", f"manager.image_mode={image_mode}",
-        "--restart", "unless-stopped",
-    ] + mount_args
+    password_file = None
+    if linuxserver_openssh and password_access:
+        secret_dir = WORKDIR / "secrets"
+        secret_dir.mkdir(mode=0o700, exist_ok=True)
+        password_file = secret_dir / f"{safe_name(name)}.password"
+        password_file.write_text(ssh_password, encoding="utf-8")
+        password_file.chmod(0o600)
 
-    if linuxserver_openssh:
-        config_volume = f"dockerhub_config_{safe_name(name)}"
-        cmd += [
-            "--label", f"manager.config_volume={config_volume}",
-            "-v", f"{config_volume}:/config",
-            "-e", f"PUID={puid}",
-            "-e", f"PGID={pgid}",
-            "-e", "TZ=Etc/UTC",
-            "-e", f"PUBLIC_KEY={public_key}",
-            "-e", f"USER_NAME={login_user}",
-            "-e", f"SUDO_ACCESS={'true' if allow_sudo else 'false'}",
-            "-e", f"PASSWORD_ACCESS={'true' if password_access else 'false'}",
-            image,
-        ]
-        password_file = None
-        if password_access:
-            secret_dir = WORKDIR / "secrets"
-            secret_dir.mkdir(mode=0o700, exist_ok=True)
-            password_file = secret_dir / f"{safe_name(name)}.password"
-            password_file.write_text(ssh_password, encoding="utf-8")
-            password_file.chmod(0o600)
-            cmd[-1:-1] = [
-                "--label", f"manager.password_file={password_file}",
-                "-v", f"{password_file}:/run/secrets/dockerhub_ssh_password:ro",
-                "-e", "USER_PASSWORD_FILE=/run/secrets/dockerhub_ssh_password",
+    max_attempts = 8 if ssh_port is None else 1
+    code, out, err = -1, "", "未开始执行"
+    selected_ssh_port = ssh_port
+    for _ in range(max_attempts):
+        selected_ssh_port = ssh_port or find_available_ssh_port()
+        if not selected_ssh_port:
+            err = "32000-32999 范围内没有可用 SSH 端口"
+            break
+        cmd = [
+            "docker", "run", "-d",
+            "--name",    name,
+            "-p",        f"{selected_ssh_port}:{container_ssh_port}",
+            "--cpus",    cpu,
+            "--memory",  memory,
+            "--pids-limit", str(pids_limit),
+            "--security-opt", "no-new-privileges",
+            "--cap-drop", "NET_RAW",
+            "--label", "manager=dockerhub",
+            "--label", f"manager.assigned_to={assigned_to}",
+            "--label", f"manager.login_user={login_user}",
+            "--label", f"manager.container_ssh_port={container_ssh_port}",
+            "--label", f"manager.image_mode={image_mode}",
+            "--restart", "unless-stopped",
+        ] + mount_args
+
+        if linuxserver_openssh:
+            config_volume = f"dockerhub_config_{safe_name(name)}"
+            cmd += [
+                "--label", f"manager.config_volume={config_volume}",
+                "-v", f"{config_volume}:/config",
+                "-e", f"PUID={puid}",
+                "-e", f"PGID={pgid}",
+                "-e", "TZ=Etc/UTC",
+                "-e", f"PUBLIC_KEY={public_key}",
+                "-e", f"USER_NAME={login_user}",
+                "-e", f"SUDO_ACCESS={'true' if allow_sudo else 'false'}",
+                "-e", f"PASSWORD_ACCESS={'true' if password_access else 'false'}",
             ]
-    else:
-        password_file = None
-        cmd += [
-            image,
-            "/bin/bash", "-c",
-            bootstrap
-        ]
+            if password_file:
+                cmd += [
+                    "--label", f"manager.password_file={password_file}",
+                    "-v", f"{password_file}:/run/secrets/dockerhub_ssh_password:ro",
+                    "-e", "USER_PASSWORD_FILE=/run/secrets/dockerhub_ssh_password",
+                ]
+            cmd.append(image)
+        else:
+            cmd += [
+                image,
+                "/bin/bash", "-c",
+                bootstrap
+            ]
 
-    code, out, err = run(cmd, timeout=300)
+        code, out, err = run(cmd, timeout=300)
+        if code == 0:
+            break
+        err_lower = (err or "").lower()
+        if "already in use by container" in err_lower:
+            existing, _ = inspect_container_details(name)
+            if password_file:
+                password_file.unlink(missing_ok=True)
+            return jsonify({
+                "ok": False,
+                "error": f"容器名称已存在: {name}",
+                "code": "container_name_conflict",
+                "existing": existing,
+            }), 409
+        port_conflict = "port is already allocated" in err_lower or "bind: address already in use" in err_lower
+        if port_conflict and ssh_port is None:
+            continue
+        if port_conflict:
+            if password_file:
+                password_file.unlink(missing_ok=True)
+            return jsonify({
+                "ok": False,
+                "error": f"SSH 端口 {selected_ssh_port} 已被占用",
+                "code": "ssh_port_conflict",
+            }), 409
+        break
+
     if code != 0:
         if password_file:
             password_file.unlink(missing_ok=True)
-        return jsonify({"ok": False, "error": err}), 500
+        error_code = "ssh_port_conflict" if "port is already allocated" in (err or "").lower() else "docker_run_failed"
+        return jsonify({"ok": False, "error": err, "code": error_code}), 500
 
     container_id = out
-    ssh_cmd = f"ssh -p {ssh_port} {login_user}@<SERVER_HOST>"
+    ssh_cmd = f"ssh -p {selected_ssh_port} {login_user}@<SERVER_HOST>"
     return jsonify({
         "ok":           True,
         "container_id": container_id,
         "ssh_cmd":      ssh_cmd,
-        "name":         name
+        "name":         name,
+        "ssh_port":     selected_ssh_port,
+        "status":       "running",
     })
 
 @app.route("/containers/<name>/stop", methods=["POST"])

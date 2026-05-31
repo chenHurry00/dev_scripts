@@ -6,12 +6,15 @@ import posixpath
 import re
 import shlex
 import subprocess
+import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
 import requests
 from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for
+from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
@@ -24,6 +27,9 @@ admin_password = (
 )
 agent_http = requests.Session()
 agent_http.trust_env = False
+image_pull_tasks = {}
+image_pull_tasks_lock = threading.Lock()
+data_lock = threading.RLock()
 
 # ── 内置配置（生产环境请替换为数据库） ──────────────────────────────────────
 DATA_FILE = Path("data.json")
@@ -32,18 +38,19 @@ SSH_PORT_MAX = 32999
 DEFAULT_SSH_IMAGE = "lscr.io/linuxserver/openssh-server:latest"
 
 def load_data():
-    if DATA_FILE.exists():
-        data = json.loads(DATA_FILE.read_text())
-    else:
-        data = {
-        "users": {
-            "admin": {"password": generate_password_hash(admin_password), "role": "admin", "created_at": datetime.now().isoformat()}
-        },
-        "servers": {},
-        "containers": {},
-        "templates": [],
-        "audit_logs": []
-    }
+    with data_lock:
+        if DATA_FILE.exists():
+            data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        else:
+            data = {
+            "users": {
+                "admin": {"password": generate_password_hash(admin_password), "role": "admin", "created_at": datetime.now().isoformat()}
+            },
+            "servers": {},
+            "containers": {},
+            "templates": [],
+            "audit_logs": []
+        }
     data.setdefault("users", {})
     data.setdefault("servers", {})
     data.setdefault("containers", {})
@@ -53,7 +60,12 @@ def load_data():
     return data
 
 def save_data(data):
-    DATA_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    with data_lock:
+        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = DATA_FILE.with_name(f".{DATA_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temp_file.write_text(payload, encoding="utf-8")
+        os.replace(temp_file, DATA_FILE)
 
 def migrate_empty_server_id(data):
     """迁移旧版允许保存的空服务器 ID，避免前端下拉框与未选择状态冲突。"""
@@ -116,12 +128,330 @@ def call_agent(server: dict, path: str, method="GET", body=None, timeout=20):
             data = resp.json()
         except ValueError:
             data = {"error": resp.text}
+        data.setdefault("status_code", resp.status_code)
         if resp.status_code >= 400:
             data.setdefault("ok", False)
             data.setdefault("error", f"Agent HTTP {resp.status_code}")
         return data
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+@app.errorhandler(Exception)
+def handle_exception(exc):
+    if isinstance(exc, HTTPException):
+        return exc
+    app.logger.exception("Unhandled exception")
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "error": f"服务器内部错误: {exc}"}), 500
+    return f"服务器内部错误: {exc}", 500
+
+def resolve_image_reference(image, registry_prefix=""):
+    """按可选 registry 前缀生成本次拉取使用的镜像地址。"""
+    image = (image or "").strip()
+    prefix = (registry_prefix or "").strip()
+    for scheme in ("https://", "http://"):
+        if prefix.startswith(scheme):
+            prefix = prefix[len(scheme):]
+    prefix = prefix.rstrip("/")
+    if not image or image.startswith("-") or any(ch.isspace() for ch in image):
+        raise ValueError("镜像地址不能为空且不能包含空白字符")
+    if prefix.startswith("-") or any(ch.isspace() for ch in prefix):
+        raise ValueError("镜像源前缀不能包含空白字符")
+    if not prefix:
+        return image
+    for docker_hub_prefix in ("docker.io/", "registry-1.docker.io/"):
+        if image.startswith(docker_hub_prefix):
+            image = image[len(docker_hub_prefix):]
+    if image.startswith(f"{prefix}/"):
+        return image
+    return f"{prefix}/{image}"
+
+def update_image_pull_task(task_id, **changes):
+    with image_pull_tasks_lock:
+        task = image_pull_tasks.get(task_id)
+        if not task:
+            return
+        task.update(changes)
+
+def append_image_pull_progress(task_id, message):
+    with image_pull_tasks_lock:
+        task = image_pull_tasks.get(task_id)
+        if not task:
+            return
+        task["progress"].append(message)
+        task["progress"] = task["progress"][-100:]
+
+def run_image_pull_task(task_id, server, image):
+    host = server.get("host", "")
+    port = server.get("agent_port", 5001)
+    token = server.get("agent_token", "")
+    url = f"http://{host}:{port}/images/pull"
+    try:
+        pull_http = requests.Session()
+        pull_http.trust_env = False
+        with pull_http.post(
+            url,
+            json={"image": image},
+            headers={"X-Agent-Token": token, "Content-Type": "application/json"},
+            stream=True,
+            timeout=(5, 3600),
+        ) as resp:
+            resp.raise_for_status()
+            for raw_line in resp.iter_lines(decode_unicode=True):
+                if not raw_line or not raw_line.startswith("data: "):
+                    continue
+                event = json.loads(raw_line[6:])
+                if event.get("msg"):
+                    append_image_pull_progress(task_id, event["msg"])
+                if event.get("done"):
+                    status = "done" if event.get("status") == "ok" else "error"
+                    update_image_pull_task(task_id, status=status, finished_at=datetime.now().isoformat())
+        with image_pull_tasks_lock:
+            task = image_pull_tasks.get(task_id, {})
+            if task.get("status") == "running":
+                task["status"] = "done"
+                task["finished_at"] = datetime.now().isoformat()
+    except Exception as exc:
+        append_image_pull_progress(task_id, f"ERROR: {exc}")
+        update_image_pull_task(task_id, status="error", finished_at=datetime.now().isoformat())
+
+    data = load_data()
+    with image_pull_tasks_lock:
+        task = image_pull_tasks.get(task_id, {})
+        status = task.get("status", "error")
+    append_audit(data, f"镜像拉取{('完成' if status == 'done' else '失败')} {image}", "INFO" if status == "done" else "WARN")
+    save_data(data)
+
+def safe_container_name(value, default="docker-env"):
+    value = re.sub(r"[^a-zA-Z0-9_-]+", "-", (value or "").strip().lower())
+    value = value.strip("-_")
+    return value or default
+
+def build_container_name(requested_name, assigned_to, login_user):
+    requested_name = safe_container_name(requested_name, "")
+    if requested_name:
+        return requested_name
+    base = safe_container_name(assigned_to or login_user, "docker-env")
+    return f"{base}-{uuid.uuid4().hex[:6]}"
+
+def build_ssh_cmd(login_user, ssh_port, ssh_host):
+    if not ssh_port:
+        return ""
+    return f"ssh -p {ssh_port} {login_user}@{ssh_host}"
+
+def parse_agent_ssh_port(container):
+    ssh_port = container.get("ssh_port")
+    if ssh_port:
+        try:
+            return int(ssh_port)
+        except (TypeError, ValueError):
+            pass
+    for port in container.get("ports") or []:
+        host_port = port.get("host_port")
+        if not host_port:
+            continue
+        try:
+            return int(host_port)
+        except (TypeError, ValueError):
+            continue
+    ports_text = container.get("ports_text") or container.get("Ports") or ""
+    match = re.search(r":(\d+)->\d+/tcp", ports_text)
+    if match:
+        return int(match.group(1))
+    return None
+
+def normalize_agent_container(raw):
+    if not isinstance(raw, dict):
+        return None
+    labels = raw.get("labels")
+    if labels is None:
+        labels_text = raw.get("Labels", "")
+        labels = {}
+        if labels_text:
+            for item in labels_text.split(","):
+                key, sep, value = item.partition("=")
+                if sep:
+                    labels[key.strip()] = value.strip()
+    name = (raw.get("name") or raw.get("Names") or raw.get("Name") or "").lstrip("/")
+    if not name:
+        return None
+    managed = labels.get("manager") == "dockerhub" if isinstance(labels, dict) else False
+    status = (raw.get("state") or "").strip().lower()
+    if not status:
+        status_text = raw.get("status") or raw.get("Status") or ""
+        if status_text.lower().startswith("up "):
+            status = "running"
+        elif status_text.lower().startswith("exited"):
+            status = "stopped"
+        else:
+            status = "unknown"
+    return {
+        "container_id": raw.get("id") or raw.get("ID") or "",
+        "name": name,
+        "image": raw.get("image") or raw.get("Image") or "",
+        "status": status,
+        "created_at": raw.get("created_at") or raw.get("CreatedAt") or "",
+        "labels": labels if isinstance(labels, dict) else {},
+        "ports": raw.get("ports") or [],
+        "ports_text": raw.get("ports_text") or raw.get("Ports") or "",
+        "ssh_port": parse_agent_ssh_port(raw),
+        "managed": managed,
+    }
+
+def find_container_record(data, server_id, name, agent_container_id=""):
+    for cid, record in data["containers"].items():
+        if agent_container_id and record.get("agent_container_id") == agent_container_id:
+            return cid, record
+        if record.get("server_id") == server_id and record.get("name") == name:
+            return cid, record
+    return None, None
+
+def register_container_record(
+    data,
+    server_id,
+    server,
+    name,
+    *,
+    assigned_to="",
+    login_user="",
+    image="",
+    ssh_port=None,
+    mounts=None,
+    cpu_limit="",
+    mem_limit="",
+    pids_limit=512,
+    agent_container_id="",
+    status="running",
+    created_at="",
+    created_by="",
+    recovered=False,
+):
+    cid, record = find_container_record(data, server_id, name, agent_container_id)
+    if record is None:
+        cid = f"ctr_{uuid.uuid4().hex[:12]}"
+        record = {}
+    before = json.dumps(record, sort_keys=True, ensure_ascii=False)
+    is_new = before == "{}"
+    next_login_user = login_user or record.get("login_user") or "dockeruser"
+    next_ssh_port = ssh_port if ssh_port is not None else record.get("ssh_port")
+    ssh_host = server.get("ssh_host") or server.get("host", "server-host")
+    next_created_by = created_by or record.get("created_by", "")
+    if recovered and is_new and not next_created_by:
+        next_created_by = "__recovered__"
+    record.update({
+        "name": name,
+        "agent_container_id": agent_container_id or record.get("agent_container_id", ""),
+        "assigned_to": assigned_to or record.get("assigned_to", ""),
+        "server_id": server_id,
+        "image": image or record.get("image", ""),
+        "ssh_port": next_ssh_port,
+        "ssh_cmd": build_ssh_cmd(next_login_user, next_ssh_port, ssh_host),
+        "login_user": next_login_user,
+        "mounts": mounts if mounts is not None else record.get("mounts", []),
+        "cpu_limit": cpu_limit or record.get("cpu_limit", ""),
+        "mem_limit": mem_limit or record.get("mem_limit", ""),
+        "pids_limit": pids_limit or record.get("pids_limit", 512),
+        "status": status or record.get("status", "unknown"),
+        "created_at": created_at or record.get("created_at", datetime.now().isoformat()),
+        "created_by": next_created_by,
+    })
+    data["containers"][cid] = record
+    after = json.dumps(record, sort_keys=True, ensure_ascii=False)
+    if recovered and is_new:
+        append_audit(data, f"从 Agent 接管孤立容器 {name}，服务器 {server_id}", "WARN")
+    return cid, record, is_new, before != after
+
+def reconcile_containers(data):
+    changed = False
+    listed_servers = set()
+    seen = set()
+    for server_id, server in data["servers"].items():
+        result = call_agent(server, "/containers", timeout=30)
+        if result.get("status_code", 200) >= 400 or result.get("error"):
+            continue
+        listed_servers.add(server_id)
+        for raw in result.get("containers", []):
+            agent_container = normalize_agent_container(raw)
+            if not agent_container or not agent_container.get("managed"):
+                continue
+            seen.add((server_id, agent_container["name"]))
+            labels = agent_container.get("labels", {})
+            _, _, _, record_changed = register_container_record(
+                data,
+                server_id,
+                server,
+                agent_container["name"],
+                assigned_to=labels.get("manager.assigned_to", ""),
+                login_user=labels.get("manager.login_user", ""),
+                image=agent_container.get("image", ""),
+                ssh_port=agent_container.get("ssh_port"),
+                agent_container_id=agent_container.get("container_id", ""),
+                status=agent_container.get("status", "unknown"),
+                created_at=agent_container.get("created_at", ""),
+                recovered=True,
+            )
+            changed = changed or record_changed
+    for record in data["containers"].values():
+        server_id = record.get("server_id", "")
+        if server_id not in listed_servers:
+            continue
+        if (server_id, record.get("name", "")) not in seen and record.get("status") != "missing":
+            record["status"] = "missing"
+            changed = True
+    return changed
+
+def adopt_agent_container(data, server_id, server, name, defaults):
+    result = call_agent(server, "/containers", timeout=30)
+    if result.get("status_code", 200) >= 400 or result.get("error"):
+        return None
+    for raw in result.get("containers", []):
+        agent_container = normalize_agent_container(raw)
+        if not agent_container or agent_container["name"] != name:
+            continue
+        cid, record, _, _ = register_container_record(
+            data,
+            server_id,
+            server,
+            name,
+            assigned_to=defaults.get("assigned_to", ""),
+            login_user=defaults.get("login_user", ""),
+            image=agent_container.get("image", defaults.get("image", "")),
+            ssh_port=agent_container.get("ssh_port"),
+            mounts=defaults.get("mounts"),
+            cpu_limit=defaults.get("cpu_limit", ""),
+            mem_limit=defaults.get("mem_limit", ""),
+            pids_limit=defaults.get("pids_limit", 512),
+            agent_container_id=agent_container.get("container_id", ""),
+            status=agent_container.get("status", "running"),
+            created_at=agent_container.get("created_at", ""),
+            created_by=defaults.get("created_by", ""),
+            recovered=True,
+        )
+        return cid, record
+    return None
+
+def choose_available_ssh_port(server, existing_records=None):
+    used_ports = set()
+    result = call_agent(server, "/containers", timeout=30)
+    if result.get("status_code", 200) < 400 and not result.get("error"):
+        for raw in result.get("containers", []):
+            agent_container = normalize_agent_container(raw)
+            if not agent_container:
+                continue
+            ssh_port = agent_container.get("ssh_port")
+            if ssh_port:
+                used_ports.add(int(ssh_port))
+    for record in existing_records or []:
+        ssh_port = record.get("ssh_port")
+        try:
+            if ssh_port:
+                used_ports.add(int(ssh_port))
+        except (TypeError, ValueError):
+            continue
+    for port in range(SSH_PORT_MIN, SSH_PORT_MAX + 1):
+        if port not in used_ports:
+            return port
+    return None
 
 def normalize_mount_roots(raw):
     """规范化服务器挂载根目录配置。"""
@@ -262,47 +592,49 @@ def api_servers():
 @login_required
 @role_required("admin")
 def api_add_server():
-    data = load_data()
     body = request.json or {}
     sid = (body.get("id") or "").strip() or f"srv_{int(time.time())}"
     if not re.match(r"^[a-zA-Z0-9_-]+$", sid):
         return jsonify({"error": "服务器 ID 只能包含字母、数字、下划线和连字符"}), 400
-    if sid in data["servers"]:
-        return jsonify({"error": "服务器 ID 已存在"}), 400
-    mount_roots = normalize_mount_roots(body.get("mount_roots", []))
-    data["servers"][sid] = {
-        "name": body.get("name", sid),
-        "host": body.get("host", ""),
-        "ssh_host": body.get("ssh_host") or body.get("host", ""),
-        "port": body.get("port", 22),
-        "agent_port": body.get("agent_port", 5001),
-        "agent_token": body.get("agent_token", ""),
-        "mount_roots": mount_roots,
-        "added_at": datetime.now().isoformat()
-    }
-    append_audit(data, f"注册服务器 {sid}")
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        if sid in data["servers"]:
+            return jsonify({"error": "服务器 ID 已存在"}), 400
+        mount_roots = normalize_mount_roots(body.get("mount_roots", []))
+        data["servers"][sid] = {
+            "name": body.get("name", sid),
+            "host": body.get("host", ""),
+            "ssh_host": body.get("ssh_host") or body.get("host", ""),
+            "port": body.get("port", 22),
+            "agent_port": body.get("agent_port", 5001),
+            "agent_token": body.get("agent_token", ""),
+            "mount_roots": mount_roots,
+            "added_at": datetime.now().isoformat()
+        }
+        append_audit(data, f"注册服务器 {sid}")
+        save_data(data)
     return jsonify({"ok": True, "id": sid})
 
 @app.route("/api/servers/<sid>", methods=["PATCH"])
 @login_required
 @role_required("admin")
 def api_update_server(sid):
-    data = load_data()
-    server = data["servers"].get(sid)
-    if not server:
-        return jsonify({"error": "服务器不存在"}), 404
     body = request.json or {}
-    server["name"] = body.get("name", server.get("name", sid))
-    server["host"] = body.get("host", server.get("host", ""))
-    server["ssh_host"] = body.get("ssh_host") or server["host"]
-    server["agent_port"] = body.get("agent_port", server.get("agent_port", 5001))
-    if body.get("agent_token"):
-        server["agent_token"] = body["agent_token"]
-    if "mount_roots" in body:
-        server["mount_roots"] = normalize_mount_roots(body["mount_roots"])
-    append_audit(data, f"更新服务器 {sid}")
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        server = data["servers"].get(sid)
+        if not server:
+            return jsonify({"error": "服务器不存在"}), 404
+        server["name"] = body.get("name", server.get("name", sid))
+        server["host"] = body.get("host", server.get("host", ""))
+        server["ssh_host"] = body.get("ssh_host") or server["host"]
+        server["agent_port"] = body.get("agent_port", server.get("agent_port", 5001))
+        if body.get("agent_token"):
+            server["agent_token"] = body["agent_token"]
+        if "mount_roots" in body:
+            server["mount_roots"] = normalize_mount_roots(body["mount_roots"])
+        append_audit(data, f"更新服务器 {sid}")
+        save_data(data)
     return jsonify({"ok": True})
 
 @app.route("/api/servers/<sid>/defaults", methods=["GET"])
@@ -324,63 +656,140 @@ def api_server_defaults(sid):
 @login_required
 @role_required("admin")
 def api_del_server(sid):
-    data = load_data()
-    data["servers"].pop(sid, None)
-    append_audit(data, f"移除服务器 {sid}", "WARN")
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        data["servers"].pop(sid, None)
+        append_audit(data, f"移除服务器 {sid}", "WARN")
+        save_data(data)
     return jsonify({"ok": True})
+
+# ── API：镜像管理 ────────────────────────────────────────────────────────────
+@app.route("/api/images", methods=["GET"])
+@login_required
+def api_images():
+    data = load_data()
+    server_id = request.args.get("server_id", "")
+    server = data["servers"].get(server_id)
+    if not server:
+        return jsonify({"error": "目标服务器不存在"}), 404
+    result = call_agent(server, "/images", timeout=30)
+    if result.get("error"):
+        return jsonify({"error": result["error"], "images": []}), 502
+    return jsonify({"ok": True, "images": result.get("images", [])})
+
+@app.route("/api/images/pull", methods=["POST"])
+@login_required
+@role_required("admin", "allocator")
+def api_pull_image():
+    body = request.json or {}
+    with data_lock:
+        data = load_data()
+        server_id = body.get("server_id", "")
+        server = data["servers"].get(server_id)
+    if not server:
+        return jsonify({"error": "目标服务器不存在"}), 404
+    try:
+        image = resolve_image_reference(body.get("image", ""), body.get("registry_prefix", ""))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    task_id = uuid.uuid4().hex
+    task = {
+        "id": task_id,
+        "server_id": server_id,
+        "image": image,
+        "status": "running",
+        "progress": [],
+        "created_at": datetime.now().isoformat(),
+        "finished_at": None,
+    }
+    with image_pull_tasks_lock:
+        image_pull_tasks[task_id] = task
+    with data_lock:
+        data = load_data()
+        append_audit(data, f"开始拉取镜像 {image}，服务器 {server_id}")
+        save_data(data)
+    threading.Thread(target=run_image_pull_task, args=(task_id, dict(server), image), daemon=True).start()
+    return jsonify({"ok": True, "task": task})
+
+@app.route("/api/images/tasks", methods=["GET"])
+@login_required
+def api_image_pull_tasks():
+    server_id = request.args.get("server_id", "")
+    with image_pull_tasks_lock:
+        tasks = [
+            json.loads(json.dumps(task))
+            for task in image_pull_tasks.values()
+            if not server_id or task.get("server_id") == server_id
+        ]
+    tasks.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return jsonify({"tasks": tasks[:20]})
 
 # ── API：容器管理 ────────────────────────────────────────────────────────────
 @app.route("/api/containers", methods=["GET"])
 @login_required
 def api_containers():
-    data = load_data()
-    containers = []
-    for cid, c in data["containers"].items():
-        containers.append({
-            "id": cid,
-            "name": c.get("name", cid),
-            "user": c.get("assigned_to", ""),
-            "server": c.get("server_id", ""),
-            "image": c.get("image", ""),
-            "ssh_port": c.get("ssh_port", ""),
-            "login_user": c.get("login_user", ""),
-            "cpu_limit": c.get("cpu_limit", ""),
-            "mem_limit": c.get("mem_limit", ""),
-            "pids_limit": c.get("pids_limit", ""),
-            "mounts": c.get("mounts", []),
-            "status": c.get("status", "running"),
-            "created_at": c.get("created_at", ""),
-            "ssh_cmd": c.get("ssh_cmd", "")
-        })
+    with data_lock:
+        data = load_data()
+        if reconcile_containers(data):
+            save_data(data)
+        containers = []
+        for cid, c in data["containers"].items():
+            containers.append({
+                "id": cid,
+                "name": c.get("name", cid),
+                "user": c.get("assigned_to", ""),
+                "server": c.get("server_id", ""),
+                "image": c.get("image", ""),
+                "ssh_port": c.get("ssh_port", ""),
+                "login_user": c.get("login_user", ""),
+                "cpu_limit": c.get("cpu_limit", ""),
+                "mem_limit": c.get("mem_limit", ""),
+                "pids_limit": c.get("pids_limit", ""),
+                "mounts": c.get("mounts", []),
+                "status": c.get("status", "running"),
+                "created_at": c.get("created_at", ""),
+                "ssh_cmd": c.get("ssh_cmd", ""),
+                "recovered": bool(c.get("created_by") == "__recovered__")
+            })
+    containers.sort(key=lambda item: item.get("created_at", ""), reverse=True)
     return jsonify({"containers": containers})
 
 @app.route("/api/containers", methods=["POST"])
 @login_required
 @role_required("admin", "allocator")
 def api_create_container():
-    data = load_data()
     body = request.json or {}
-    cid = f"ctr_{int(time.time())}"
-    ssh_port = int(body.get("ssh_port", SSH_PORT_MIN + len(data["containers"])))
-    if ssh_port < SSH_PORT_MIN or ssh_port > SSH_PORT_MAX:
-        return jsonify({"error": f"SSH 端口必须位于 {SSH_PORT_MIN}-{SSH_PORT_MAX}"}), 400
-    server_id = body.get("server_id", "")
-    server = data["servers"].get(server_id)
+    with data_lock:
+        data = load_data()
+        server_id = body.get("server_id", "")
+        server = data["servers"].get(server_id)
     if not server:
         return jsonify({"error": "目标服务器不存在"}), 400
 
-    name = body.get("name", f"容器_{cid}")
     assigned_to = body.get("assigned_to", "")
-    login_user = body.get("login_user") or assigned_to or "dockeruser"
+    login_user = safe_container_name(body.get("login_user") or assigned_to or "dockeruser", "dockeruser")
+    name = build_container_name(body.get("name", ""), assigned_to, login_user)
     ssh_host = server.get("ssh_host") or server.get("host", "server-host")
-    ssh_cmd = f"ssh -p {ssh_port} {login_user}@{ssh_host}"
     cpu_limit = body.get("cpu_limit")
     mem_limit = body.get("mem_limit")
     if not cpu_limit or not mem_limit:
         default_cpu, default_mem = default_resources(server)
         cpu_limit = cpu_limit or default_cpu
         mem_limit = mem_limit or default_mem
+    raw_ssh_port = body.get("ssh_port")
+    ssh_port = None
+    if str(raw_ssh_port or "").strip():
+        try:
+            ssh_port = int(raw_ssh_port)
+        except (TypeError, ValueError):
+            return jsonify({"error": "SSH 端口必须是数字，或留空自动分配"}), 400
+        if ssh_port < SSH_PORT_MIN or ssh_port > SSH_PORT_MAX:
+            return jsonify({"error": f"SSH 端口必须位于 {SSH_PORT_MIN}-{SSH_PORT_MAX}"}), 400
+    else:
+        ssh_port = choose_available_ssh_port(server, data["containers"].values())
+        if ssh_port is None:
+            return jsonify({"error": f"{SSH_PORT_MIN}-{SSH_PORT_MAX} 范围内没有可用 SSH 端口"}), 400
 
     mounts = body["mounts"] if "mounts" in body else build_default_mounts(server, assigned_to, name)
     agent_body = {
@@ -395,59 +804,114 @@ def api_create_container():
         "password_access": bool(body.get("password_access", False)),
         "ssh_password": body.get("ssh_password", ""),
         "allow_sudo": bool(body.get("allow_sudo", False)),
+        "assigned_to": assigned_to,
         "mounts": mounts,
         "allowed_mount_roots": server.get("mount_roots", []),
     }
 
     agent_result = call_agent(server, "/containers/create", method="POST", body=agent_body, timeout=330)
-    if not agent_result.get("ok"):
-        return jsonify({"error": agent_result.get("error", "Agent 创建容器失败")}), 500
-
-    data["containers"][cid] = {
-        "name": name,
-        "agent_container_id": agent_result.get("container_id", ""),
+    defaults = {
         "assigned_to": assigned_to,
-        "server_id": server_id,
-        "image": agent_body["image"],
-        "ssh_port": ssh_port,
-        "ssh_cmd": ssh_cmd,
         "login_user": login_user,
+        "image": agent_body["image"],
         "mounts": mounts,
         "cpu_limit": cpu_limit,
         "mem_limit": mem_limit,
         "pids_limit": agent_body["pids_limit"],
-        "status": "running",
-        "created_at": datetime.now().isoformat(),
-        "created_by": session["user"]
+        "created_by": session["user"],
     }
-    append_audit(data, f"创建容器 {name}，服务器 {server_id}")
-    save_data(data)
-    return jsonify({"ok": True, "id": cid, "ssh_cmd": ssh_cmd})
+    if not agent_result.get("ok"):
+        conflict = (
+            agent_result.get("code") == "container_name_conflict"
+            or agent_result.get("status_code") == 409
+            or "already in use" in str(agent_result.get("error", ""))
+        )
+        if conflict:
+            with data_lock:
+                data = load_data()
+                adopted = adopt_agent_container(data, server_id, server, name, defaults)
+                if adopted:
+                    cid, record = adopted
+                    save_data(data)
+                    return jsonify({
+                        "ok": True,
+                        "id": cid,
+                        "ssh_cmd": record.get("ssh_cmd", ""),
+                        "name": record.get("name", name),
+                        "ssh_port": record.get("ssh_port"),
+                        "recovered": True,
+                    })
+        status_code = 409 if conflict else (agent_result.get("status_code") if agent_result.get("status_code", 500) >= 400 else 500)
+        return jsonify({"error": agent_result.get("error", "Agent 创建容器失败")}), status_code
+
+    final_ssh_port = agent_result.get("ssh_port") or ssh_port
+    try:
+        final_ssh_port = int(final_ssh_port) if final_ssh_port else None
+    except (TypeError, ValueError):
+        final_ssh_port = ssh_port
+    with data_lock:
+        data = load_data()
+        cid, record, _, _ = register_container_record(
+            data,
+            server_id,
+            server,
+            name,
+            assigned_to=assigned_to,
+            login_user=login_user,
+            image=agent_body["image"],
+            ssh_port=final_ssh_port,
+            mounts=mounts,
+            cpu_limit=cpu_limit,
+            mem_limit=mem_limit,
+            pids_limit=agent_body["pids_limit"],
+            agent_container_id=agent_result.get("container_id", ""),
+            status=agent_result.get("status", "running"),
+            created_at=datetime.now().isoformat(),
+            created_by=session["user"],
+        )
+        append_audit(data, f"创建容器 {name}，服务器 {server_id}")
+        save_data(data)
+    return jsonify({
+        "ok": True,
+        "id": cid,
+        "ssh_cmd": record.get("ssh_cmd", build_ssh_cmd(login_user, final_ssh_port, ssh_host)),
+        "name": record.get("name", name),
+        "ssh_port": record.get("ssh_port"),
+    })
 
 @app.route("/api/containers/<cid>", methods=["DELETE"])
 @login_required
 @role_required("admin", "allocator")
 def api_del_container(cid):
-    data = load_data()
-    container = data["containers"].get(cid)
+    with data_lock:
+        data = load_data()
+        container = data["containers"].get(cid)
     if container:
         server = data["servers"].get(container.get("server_id", ""))
         if server:
             result = call_agent(server, f"/containers/{container.get('name')}/remove", method="DELETE", timeout=60)
-            if not result.get("ok"):
+            not_found = (
+                result.get("status_code") == 404
+                or "No such container" in str(result.get("error", ""))
+                or "No such object" in str(result.get("error", ""))
+            )
+            if not result.get("ok") and not not_found:
                 return jsonify({"error": result.get("error", "Agent 删除容器失败")}), 500
-    data["containers"].pop(cid, None)
-    append_audit(data, f"删除容器 {container.get('name', cid) if container else cid}", "WARN")
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        container = data["containers"].pop(cid, None)
+        append_audit(data, f"删除容器 {container.get('name', cid) if container else cid}", "WARN")
+        save_data(data)
     return jsonify({"ok": True})
 
 @app.route("/api/containers/<cid>/resources", methods=["PATCH"])
 @login_required
 @role_required("admin", "allocator")
 def api_update_container_resources(cid):
-    data = load_data()
     body = request.json or {}
-    container = data["containers"].get(cid)
+    with data_lock:
+        data = load_data()
+        container = data["containers"].get(cid)
     if not container:
         return jsonify({"error": "容器不存在"}), 404
     server = data["servers"].get(container.get("server_id", ""))
@@ -469,11 +933,16 @@ def api_update_container_resources(cid):
     if not result.get("ok"):
         return jsonify({"error": result.get("error", "资源更新失败")}), 500
 
-    container["cpu_limit"] = payload["cpu"]
-    container["mem_limit"] = payload["memory"]
-    container["pids_limit"] = payload["pids_limit"]
-    append_audit(data, f"更新容器资源 {container.get('name', cid)}")
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        container = data["containers"].get(cid)
+        if not container:
+            return jsonify({"error": "容器不存在"}), 404
+        container["cpu_limit"] = payload["cpu"]
+        container["mem_limit"] = payload["memory"]
+        container["pids_limit"] = payload["pids_limit"]
+        append_audit(data, f"更新容器资源 {container.get('name', cid)}")
+        save_data(data)
     return jsonify({"ok": True})
 
 # ── API：用户管理 ────────────────────────────────────────────────────────────
@@ -490,36 +959,38 @@ def api_users():
 @login_required
 @role_required("admin")
 def api_add_user():
-    data = load_data()
     body = request.json or {}
     uname = body.get("username", "")
     password = body.get("password", "")
     role = body.get("role", "allocator")
-    if not uname or uname in data["users"]:
-        return jsonify({"error": "用户名无效或已存在"}), 400
     if len(password) < 8:
         return jsonify({"error": "密码至少需要 8 位"}), 400
     if role not in ("admin", "allocator"):
         return jsonify({"error": "角色无效"}), 400
-    data["users"][uname] = {
-        "password": generate_password_hash(password),
-        "role": role,
-        "created_at": datetime.now().isoformat()
-    }
-    append_audit(data, f"添加平台用户 {uname}")
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        if not uname or uname in data["users"]:
+            return jsonify({"error": "用户名无效或已存在"}), 400
+        data["users"][uname] = {
+            "password": generate_password_hash(password),
+            "role": role,
+            "created_at": datetime.now().isoformat()
+        }
+        append_audit(data, f"添加平台用户 {uname}")
+        save_data(data)
     return jsonify({"ok": True})
 
 @app.route("/api/users/<uname>", methods=["DELETE"])
 @login_required
 @role_required("admin")
 def api_del_user(uname):
-    data = load_data()
     if uname == "admin":
         return jsonify({"error": "不能删除 admin"}), 400
-    data["users"].pop(uname, None)
-    append_audit(data, f"删除平台用户 {uname}", "WARN")
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        data["users"].pop(uname, None)
+        append_audit(data, f"删除平台用户 {uname}", "WARN")
+        save_data(data)
     return jsonify({"ok": True})
 
 # ── 审计日志 ───────────────────────────────────────────────────────────────
@@ -563,11 +1034,12 @@ def api_config_import():
     payload = request.json or {}
     if payload.get("version") != 1:
         return jsonify({"error": "不支持的配置版本"}), 400
-    data = load_data()
-    for key in ("users", "servers", "containers", "templates", "audit_logs"):
-        if key in payload:
-            data[key] = payload[key]
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        for key in ("users", "servers", "containers", "templates", "audit_logs"):
+            if key in payload:
+                data[key] = payload[key]
+        save_data(data)
     return jsonify({"ok": True})
 
 if __name__ == "__main__":
