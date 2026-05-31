@@ -288,9 +288,14 @@ def normalize_agent_container(raw):
     status = (raw.get("state") or "").strip().lower()
     if not status:
         status_text = raw.get("status") or raw.get("Status") or ""
-        if status_text.lower().startswith("up "):
+        status_text = str(status_text).strip().lower()
+        if status_text in {"running", "restarting", "paused"}:
+            status = status_text
+        elif status_text in {"exited", "dead", "created"}:
+            status = "stopped"
+        elif status_text.startswith("up "):
             status = "running"
-        elif status_text.lower().startswith("exited"):
+        elif status_text.startswith("exited"):
             status = "stopped"
         else:
             status = "unknown"
@@ -904,7 +909,7 @@ def api_create_container():
         "ssh_public_key": body.get("ssh_public_key", ""),
         "password_access": bool(body.get("password_access", False)),
         "ssh_password": body.get("ssh_password", ""),
-        "allow_sudo": bool(body.get("allow_sudo", False)),
+        "allow_sudo": bool(body.get("allow_sudo", True)),
         "assigned_to": assigned_to,
         "mounts": mounts,
         "allowed_mount_roots": server.get("mount_roots", []),

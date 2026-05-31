@@ -954,7 +954,7 @@ def create_container():
     public_key = (body.get("ssh_public_key") or "").strip()
     password_access = bool(body.get("password_access", False))
     ssh_password = body.get("ssh_password", "")
-    allow_sudo = bool(body.get("allow_sudo", False))
+    allow_sudo = bool(body.get("allow_sudo", True))
     gpu_enabled = bool(body.get("gpu_enabled", False))
     gpu_devices = normalize_gpu_device_list(body.get("gpu_devices", []))
     gpu_mode = str(body.get("gpu_mode", "shared") or "shared").strip() or "shared"
@@ -1054,7 +1054,15 @@ def create_container():
     escaped_key = shlex.quote(public_key)
     sudo_cmd = ""
     if allow_sudo:
-        sudo_cmd = "apt-get install -y sudo -qq && usermod -aG sudo {user} && ".format(user=escaped_user)
+        sudo_cmd = (
+            "apt-get install -y sudo -qq && "
+            "usermod -aG sudo {user} && "
+            "echo {sudoers} > /etc/sudoers.d/90-dockerhub-user && "
+            "chmod 440 /etc/sudoers.d/90-dockerhub-user && "
+        ).format(
+            user=escaped_user,
+            sudoers=shlex.quote(f"{login_user} ALL=(ALL) NOPASSWD:ALL"),
+        )
     password_bootstrap = (
         "if grep -Eq '^#?PasswordAuthentication ' /etc/ssh/sshd_config; then "
         "sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config; "
@@ -1119,7 +1127,6 @@ def create_container():
             "--cpus",    cpu,
             "--memory",  memory,
             "--pids-limit", str(pids_limit),
-            "--security-opt", "no-new-privileges",
             "--cap-drop", "NET_RAW",
             "--label", "manager=dockerhub",
             "--label", f"manager.assigned_to={assigned_to}",
@@ -1133,6 +1140,8 @@ def create_container():
             "--label", f"manager.rootfs_limit={rootfs_limit}",
             "--restart", "unless-stopped",
         ] + mount_args
+        if not allow_sudo:
+            cmd += ["--security-opt", "no-new-privileges"]
 
         if rootfs_limit:
             cmd += ["--storage-opt", f"size={rootfs_limit}"]

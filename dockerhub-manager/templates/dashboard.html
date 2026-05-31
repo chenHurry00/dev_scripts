@@ -1506,7 +1506,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
       <div class="form-field">
         <label class="form-label"><input type="checkbox" id="ctr-password-access" onchange="togglePasswordAccess()"> 启用 SSH 密码登录</label>
         <input class="form-input" type="password" id="ctr-ssh-password" placeholder="至少 8 位" style="display:none">
-        <div class="form-hint">仅默认 OpenSSH 镜像支持。密码不会保存到面板配置；公网环境不建议启用。</div>
+        <div class="form-hint">当前创建的登录用户默认授予 sudo 权限。密码不会保存到面板配置；如需设置 root 密码，可登录后执行 <code>sudo passwd root</code>。</div>
       </div>
       <div class="form-row">
         <div class="form-field">
@@ -2641,6 +2641,7 @@ async function createContainer() {
     rootfs_limit: rootfsLimit,
     ssh_port:    portValue ? parseInt(portValue, 10) : null,
     ssh_public_key: document.getElementById('ctr-ssh-key').value,
+    allow_sudo: true,
     password_access: document.getElementById('ctr-password-access').checked,
     ssh_password: document.getElementById('ctr-ssh-password').value,
     mounts: collectRegisteredMounts().concat(parseContainerMounts(document.getElementById('ctr-mounts').value))
