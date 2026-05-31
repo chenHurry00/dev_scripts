@@ -1506,6 +1506,9 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           <div class="page-title">平台用户</div>
         </div>
         <div class="page-actions">
+          <button class="btn" onclick="exportConfig(false, this)">导出配置</button>
+          <button class="btn" onclick="exportConfig(true, this)">导出完整配置</button>
+          <button class="btn" onclick="openConfigImportModal()">导入配置</button>
           <button class="btn btn-primary" onclick="openModal('modal-add-usr')">+ 添加用户</button>
         </div>
       </div>
@@ -1525,6 +1528,19 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             </thead>
             <tbody id="usr-table-body"></tbody>
           </table>
+        </div>
+        <div class="table-wrap" style="margin-top:18px">
+          <div class="table-header">
+            <div class="table-title">配置备份与恢复</div>
+          </div>
+          <div style="padding:16px">
+            <div class="form-hint" style="margin-top:0">
+              普通导出不包含 Agent Token，适合日常留档。完整导出包含 Agent Token，适合在面板迁移或故障恢复时重新接管原有服务器。
+            </div>
+            <div class="form-hint">
+              导入配置会覆盖当前面板中的用户、服务器、容器记录、模板和审计日志。导入前建议先导出当前配置。
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1745,6 +1761,36 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('modal-add-usr')">取消</button>
       <button class="btn btn-primary" onclick="addUser()">添加用户</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ MODAL: 导入配置 ═══════ -->
+<div class="modal-overlay" id="modal-import-config">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">导入配置</div>
+      <button class="modal-close" onclick="closeModal('modal-import-config')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label class="form-label">配置文件</label>
+        <input class="form-input" type="file" id="cfg-import-file" accept="application/json,.json">
+        <div class="form-hint">请选择通过“导出配置”或“导出完整配置”生成的 JSON 文件。</div>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label class="form-label">导入说明</label>
+        <div class="form-hint" style="margin-top:0">
+          导入后会覆盖当前面板中的用户、服务器、容器记录、模板和操作日志。
+        </div>
+        <div class="form-hint">
+          如果配置文件包含 Agent Token，导入后可直接恢复与原有服务器的连接能力。
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-import-config')">取消</button>
+      <button class="btn btn-primary" id="cfg-import-submit" onclick="importConfig()">确认导入</button>
     </div>
   </div>
 </div>
@@ -1982,6 +2028,15 @@ function isContainersPanelActive() {
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) {
   document.getElementById(id).classList.remove('open');
+  if (id === 'modal-import-config') {
+    const input = document.getElementById('cfg-import-file');
+    if (input) input.value = '';
+    const submitBtn = document.getElementById('cfg-import-submit');
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '确认导入';
+    }
+  }
   if (id === 'modal-edit-ctr-resource') {
     STATE.editingContainerId = null;
     document.getElementById('edit-ctr-resource-submit').disabled = false;
@@ -2292,6 +2347,31 @@ async function api(url, opts = {}) {
     ...opts
   });
   return r.json();
+}
+
+function formatFilenameTimestamp(date = new Date()) {
+  const pad = value => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('') + '-' + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join('');
+}
+
+function downloadJsonFile(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function parseMountRoots(text) {
@@ -3385,6 +3465,91 @@ async function delUser(uname) {
   if (!confirm(`确认删除用户 ${uname}？`)) return;
   const res = await api(`/api/users/${uname}`, { method: 'DELETE' });
   if (res.ok) { toast('用户已删除', 'warn'); loadUsers(); loadAuditLogs(); }
+}
+
+function openConfigImportModal() {
+  const input = document.getElementById('cfg-import-file');
+  if (input) input.value = '';
+  openModal('modal-import-config');
+}
+
+async function exportConfig(includeTokens, button) {
+  if (includeTokens && !confirm('完整配置包含 Agent Token 和连接信息，请确认只保存到受控位置。是否继续导出？')) {
+    return;
+  }
+  const btn = button || null;
+  const originalText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '导出中...';
+  }
+  try {
+    const suffix = includeTokens ? '?include_tokens=1' : '';
+    const data = await api(`/api/config/export${suffix}`);
+    if (!data.version) {
+      throw new Error(data.error || '配置导出失败');
+    }
+    const filename = includeTokens
+      ? `dockerhub-manager-config-full-${formatFilenameTimestamp()}.json`
+      : `dockerhub-manager-config-${formatFilenameTimestamp()}.json`;
+    downloadJsonFile(data, filename);
+    toast(includeTokens ? '完整配置已导出' : '配置已导出', 'ok');
+    loadAuditLogs();
+  } catch (error) {
+    toast(error.message || '配置导出失败', 'danger');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
+}
+
+async function importConfig() {
+  const input = document.getElementById('cfg-import-file');
+  const file = input && input.files ? input.files[0] : null;
+  if (!file) {
+    toast('请先选择配置文件', 'warn');
+    return;
+  }
+  if (!confirm('导入配置会覆盖当前面板中的用户、服务器、容器记录、模板和操作日志。是否继续？')) {
+    return;
+  }
+  const submitBtn = document.getElementById('cfg-import-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '导入中...';
+  try {
+    const text = await file.text();
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      throw new Error('配置文件不是合法的 JSON');
+    }
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('配置文件内容无效');
+    }
+    const res = await api('/api/config/import', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      throw new Error(res.error || '配置导入失败');
+    }
+    closeModal('modal-import-config');
+    toast('配置已导入', 'ok');
+    await loadOverview();
+    await loadServers();
+    await loadContainers();
+    if (STATE.role === 'admin') {
+      await loadUsers();
+    }
+    await loadAuditLogs();
+  } catch (error) {
+    toast(error.message || '配置导入失败', 'danger');
+    submitBtn.disabled = false;
+    submitBtn.textContent = '确认导入';
+  }
 }
 
 async function copyText(text) {

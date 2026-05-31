@@ -1319,8 +1319,11 @@ def api_me():
 @login_required
 @role_required("admin")
 def api_config_export():
-    data = load_data()
     include_tokens = request.args.get("include_tokens") == "1"
+    with data_lock:
+        data = load_data()
+        append_audit(data, f"导出{'完整' if include_tokens else '普通'}配置", "WARN" if include_tokens else "INFO")
+        save_data(data)
     payload = {
         "version": 1,
         "exported_at": datetime.now().isoformat(),
@@ -1348,6 +1351,7 @@ def api_config_import():
         for key in ("users", "servers", "containers", "templates", "audit_logs"):
             if key in payload:
                 data[key] = payload[key]
+        append_audit(data, "导入配置并覆盖当前面板记录", "WARN")
         save_data(data)
     return jsonify({"ok": True})
 
