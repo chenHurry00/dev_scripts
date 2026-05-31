@@ -46,6 +46,105 @@ ask_yes_no() {
   [[ "$answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
 }
 
+run_local_agent_capability_check() {
+  local agent_port="$1"
+  local agent_token="$2"
+  AGENT_PORT="$agent_port" AGENT_TOKEN="$agent_token" python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+port = os.environ['AGENT_PORT']
+token = os.environ['AGENT_TOKEN']
+base = f'http://127.0.0.1:{port}'
+
+def fetch(path):
+    req = urllib.request.Request(base + path, headers={'X-Agent-Token': token})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+try:
+    checks = fetch('/checks')
+    gpu = fetch('/gpu/info')
+except Exception as exc:
+    print(f'AGENT_CAPABILITY_ERROR: {exc}')
+    sys.exit(2)
+
+storage = checks.get('storage') or {}
+driver = storage.get('driver') or 'unknown'
+backing = storage.get('backing_filesystem') or 'unknown'
+quota = ','.join(storage.get('quota_flags') or []) or 'none'
+
+print('Agent 能力摘要：')
+print(f'  - Docker 存储驱动: {driver}')
+if storage.get('supports_rootfs_limit'):
+    print(f'  - 可写层磁盘限额: 支持（backing fs: {backing}, quota: {quota}）')
+else:
+    reason = storage.get('reason') or '当前环境不支持'
+    print(f'  - 可写层磁盘限额: 不支持（{reason}）')
+
+devices = gpu.get('devices') or []
+if gpu.get('supported'):
+    print(f'  - GPU 容器支持: 支持（检测到 {len(devices)} 张 GPU）')
+    if devices:
+        names = ', '.join(f"{item.get('index', '?')}:{item.get('name', 'unknown')}" for item in devices)
+        print(f'  - GPU 列表: {names}')
+    print('AGENT_GPU_STATUS: supported')
+else:
+    print('  - GPU 容器支持: 未就绪')
+    missing = gpu.get('missing') or []
+    suggestions = gpu.get('suggestions') or []
+    if missing:
+        print('  - 缺失项:')
+        for item in missing:
+            print(f'    * {item}')
+    if suggestions:
+        print('  - 建议:')
+        for item in suggestions:
+            print(f'    * {item}')
+    print('  - 后续动作: 继续安装 Agent / 退出脚本')
+    print('AGENT_GPU_STATUS: missing')
+PY
+}
+
+show_local_agent_capability_summary() {
+  local agent_port="$1"
+  local agent_token="$2"
+  local exit_on_gpu_missing="${3:-0}"
+
+  echo ""
+  echo "检查 Agent 能力..."
+  local capability_output
+  capability_output="$(run_local_agent_capability_check "$agent_port" "$agent_token" 2>&1 || true)"
+  echo "$capability_output" | sed '/^AGENT_GPU_STATUS:/d'
+
+  if echo "$capability_output" | grep -q '^AGENT_CAPABILITY_ERROR:'; then
+    echo "⚠ Agent 能力检查未完成，但 Agent 已启动。"
+    return 0
+  fi
+
+  if echo "$capability_output" | grep -q 'AGENT_GPU_STATUS: missing'; then
+    echo ""
+    echo "⚠ 检测到当前服务器未满足 GPU 容器运行条件。"
+    echo "  Agent 已完成启动，但 GPU 功能暂不可用。"
+    if [[ "$exit_on_gpu_missing" == "1" ]]; then
+      if [[ -t 0 ]]; then
+        local continue_install
+        read -r -p "是否继续完成当前 Agent 安装并稍后手动处理 GPU？输入 continue 继续，其他退出: " continue_install
+        if [[ "$continue_install" != "continue" ]]; then
+          echo "已退出。当前 Agent 文件和服务已部署，如不需要可执行："
+          echo "  sudo bash ${AGENT_DIR}/uninstall.sh"
+          exit 35
+        fi
+      else
+        echo "  当前为非交互模式，默认退出。"
+        exit 35
+      fi
+    fi
+  fi
+}
+
 random_secret() {
   if ! command -v openssl >/dev/null 2>&1; then
     echo "错误：未检测到 openssl，无法生成随机密钥。"
@@ -367,6 +466,8 @@ EOF
     run_root systemctl status dockerhub-agent --no-pager -l || true
     exit 34
   fi
+  show_local_agent_capability_summary "$agent_port" "$agent_token" 1
+
   echo ""
   echo "请在中心面板中添加本机服务器："
   echo "  主机 IP / 域名: 127.0.0.1"
@@ -395,6 +496,16 @@ panel_restart() {
 
 agent_status() {
   run_root systemctl status dockerhub-agent --no-pager -l
+  local agent_port
+  local agent_token
+  agent_port="$(read_env_value "$AGENT_ENV" AGENT_PORT || true)"
+  agent_token="$(read_env_value "$AGENT_ENV" AGENT_TOKEN || true)"
+  if [[ -n "$agent_port" && -n "$agent_token" ]]; then
+    show_local_agent_capability_summary "$agent_port" "$agent_token" 0
+  else
+    echo ""
+    echo "提示：未检测到本机 Agent 配置文件，跳过能力检查。"
+  fi
 }
 
 agent_logs() {
@@ -402,8 +513,23 @@ agent_logs() {
 }
 
 agent_restart() {
+  local agent_port
+  local agent_token
+  agent_port="$(read_env_value "$AGENT_ENV" AGENT_PORT || true)"
+  agent_token="$(read_env_value "$AGENT_ENV" AGENT_TOKEN || true)"
   run_root systemctl restart dockerhub-agent
+  sleep 2
   echo "✓ 本机 Agent 已重启"
+  if [[ -n "$agent_port" && -n "$agent_token" ]]; then
+    if ! curl --noproxy '*' --connect-timeout 3 --max-time 5 -fsS "http://127.0.0.1:${agent_port}/ping" >/dev/null; then
+      echo "错误：本机 Agent 重启后未通过连通性检查。"
+      run_root systemctl status dockerhub-agent --no-pager -l || true
+      exit 36
+    fi
+    show_local_agent_capability_summary "$agent_port" "$agent_token" 0
+  else
+    echo "提示：未检测到本机 Agent 配置文件，跳过能力检查。"
+  fi
 }
 
 disable_panel() {

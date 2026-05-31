@@ -9,6 +9,7 @@ DockerHub Manager — Server Agent
 systemd 服务文件示例见文档末尾注释。
 """
 
+import csv
 import json
 import os
 import re
@@ -148,6 +149,279 @@ def inspect_container_details(name):
         ),
         "ssh_port": ssh_port,
     }, None
+
+def docker_info_json():
+    code, out, err = run(["docker", "info", "--format", "{{json .}}"], timeout=30)
+    if code != 0:
+        return None, err or "docker info 执行失败"
+    try:
+        return json.loads(out), None
+    except ValueError:
+        return None, "docker info 返回无效 JSON"
+
+def parse_driver_status_map(driver_status):
+    mapping = {}
+    if not isinstance(driver_status, list):
+        return mapping
+    for row in driver_status:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            mapping[str(row[0])] = str(row[1])
+    return mapping
+
+def decode_proc_mount_field(value):
+    return value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
+
+def mount_options_for_path(target_path):
+    target = Path(target_path or "/").resolve()
+    best_mount = None
+    best_options = set()
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                mount_point = Path(decode_proc_mount_field(parts[1])).resolve()
+                try:
+                    target.relative_to(mount_point)
+                except ValueError:
+                    continue
+                if best_mount is None or len(str(mount_point)) > len(str(best_mount)):
+                    best_mount = mount_point
+                    best_options = set(parts[3].split(","))
+    except OSError:
+        return set()
+    return best_options
+
+def collect_storage_capabilities():
+    info, error = docker_info_json()
+    if not info:
+        return {
+            "driver": "",
+            "backing_filesystem": "",
+            "docker_root_dir": "",
+            "supports_rootfs_limit": False,
+            "quota_flags": [],
+            "reason": error or "Docker 信息读取失败",
+        }
+
+    driver = str(info.get("Driver") or "")
+    docker_root_dir = str(info.get("DockerRootDir") or "")
+    driver_status = parse_driver_status_map(info.get("DriverStatus") or [])
+    backing_fs = (
+        driver_status.get("Backing Filesystem")
+        or driver_status.get("Backing filesystem")
+        or driver_status.get("Backing FS")
+        or ""
+    )
+    mount_options = mount_options_for_path(docker_root_dir or "/")
+    quota_flags = [flag for flag in ("pquota", "prjquota") if flag in mount_options]
+
+    supports_rootfs_limit = False
+    reason = ""
+    if driver == "overlay2":
+        supports_rootfs_limit = backing_fs.lower() == "xfs" and bool(quota_flags)
+        if not supports_rootfs_limit:
+            reason = "overlay2 仅在 XFS 且启用 pquota/prjquota 时支持可写层限额"
+    elif driver in {"btrfs", "zfs", "windowsfilter"}:
+        supports_rootfs_limit = True
+    else:
+        reason = f"当前存储驱动 {driver or 'unknown'} 未启用可写层限额支持"
+
+    return {
+        "driver": driver,
+        "backing_filesystem": backing_fs,
+        "docker_root_dir": docker_root_dir,
+        "supports_rootfs_limit": supports_rootfs_limit,
+        "quota_flags": quota_flags,
+        "reason": reason,
+    }
+
+SIZE_UNITS = {
+    "b": 1,
+    "kb": 1000,
+    "mb": 1000 ** 2,
+    "gb": 1000 ** 3,
+    "tb": 1000 ** 4,
+    "kib": 1024,
+    "mib": 1024 ** 2,
+    "gib": 1024 ** 3,
+    "tib": 1024 ** 4,
+}
+
+def parse_size_to_bytes(value):
+    raw = str(value or "").strip()
+    if not raw or raw in {"0", "0B", "0.00B", "--"}:
+        return 0
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]+)?$", raw)
+    if not match:
+        return 0
+    number = float(match.group(1))
+    unit = (match.group(2) or "B").lower()
+    factor = SIZE_UNITS.get(unit)
+    if factor is None:
+        return 0
+    return int(number * factor)
+
+def parse_percent(value):
+    raw = str(value or "").strip().rstrip("%")
+    if not raw:
+        return 0.0
+    try:
+        return round(float(raw), 2)
+    except ValueError:
+        return 0.0
+
+def parse_mem_usage_bytes(value):
+    parts = str(value or "").split(" / ", 1)
+    used = parse_size_to_bytes(parts[0]) if parts else 0
+    limit = parse_size_to_bytes(parts[1]) if len(parts) > 1 else 0
+    return used, limit
+
+def list_managed_container_names(include_stopped=True):
+    cmd = ["docker", "ps"]
+    if include_stopped:
+        cmd.append("-a")
+    cmd += ["--filter", "label=manager=dockerhub", "--format", "{{.Names}}"]
+    code, out, err = run(cmd, timeout=20)
+    if code != 0:
+        return None, err or "读取容器列表失败"
+    return [line.strip() for line in out.splitlines() if line.strip()], None
+
+def inspect_container_size(name):
+    code, out, err = run(["docker", "inspect", "--size", "--format", "{{json .}}", name], timeout=20)
+    if code != 0:
+        return None, err or "容器大小读取失败"
+    try:
+        raw = json.loads(out)
+    except ValueError:
+        return None, "容器大小返回无效 JSON"
+    return {
+        "disk_rw_bytes": int(raw.get("SizeRw") or 0),
+        "disk_rootfs_bytes": int(raw.get("SizeRootFs") or 0),
+    }, None
+
+def collect_running_container_stats(names):
+    if not names:
+        return {}, None
+    code, out, err = run(
+        ["docker", "stats", "--no-stream", "--format", "{{json .}}"] + list(names),
+        timeout=max(20, 5 + len(names) * 2),
+    )
+    if code != 0:
+        return {}, err or "docker stats 执行失败"
+    stats = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        name = row.get("Name") or row.get("Container") or ""
+        if not name:
+            continue
+        memory_used, memory_limit = parse_mem_usage_bytes(row.get("MemUsage", ""))
+        pids_value = str(row.get("PIDs", "")).strip()
+        try:
+            pids = int(pids_value)
+        except ValueError:
+            pids = None
+        stats[name] = {
+            "cpu_percent": parse_percent(row.get("CPUPerc", "")),
+            "memory_used_bytes": memory_used,
+            "memory_limit_bytes": memory_limit,
+            "pids_current": pids,
+        }
+    return stats, None
+
+def docker_supports_gpus_flag():
+    code, out, _ = run(["docker", "run", "--help"], timeout=20)
+    return code == 0 and "--gpus" in out
+
+def collect_gpu_info():
+    info, docker_info_error = docker_info_json()
+    runtimes = {}
+    if info:
+        runtimes = info.get("Runtimes") or {}
+
+    nvidia_smi_exists = shutil.which("nvidia-smi") is not None
+    nvidia_ctk_exists = shutil.which("nvidia-ctk") is not None
+    nvidia_runtime_exists = shutil.which("nvidia-container-runtime") is not None
+    docker_has_gpus_flag = docker_supports_gpus_flag()
+    toolkit_installed = bool(nvidia_ctk_exists or nvidia_runtime_exists or "nvidia" in runtimes)
+    driver_installed = False
+    devices = []
+    missing = []
+    suggestions = []
+
+    if not nvidia_smi_exists:
+        missing.append("未找到 nvidia-smi，疑似未安装 NVIDIA 驱动")
+        suggestions.append("先在宿主机安装与当前 GPU/内核匹配的 NVIDIA 驱动，并确认 nvidia-smi 可执行。")
+    else:
+        code, out, err = run([
+            "nvidia-smi",
+            "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu,driver_version",
+            "--format=csv,noheader,nounits",
+        ], timeout=20)
+        if code != 0:
+            missing.append(f"nvidia-smi 执行失败: {err or 'unknown error'}")
+            suggestions.append("先修复宿主机 NVIDIA 驱动状态，确认 nvidia-smi 可正常返回 GPU 列表。")
+        else:
+            driver_installed = True
+            reader = csv.reader(out.splitlines())
+            for row in reader:
+                if len(row) < 7:
+                    continue
+                try:
+                    total_mb = int(float(row[3].strip()))
+                except ValueError:
+                    total_mb = 0
+                try:
+                    used_mb = int(float(row[4].strip()))
+                except ValueError:
+                    used_mb = 0
+                try:
+                    util_percent = int(float(row[5].strip()))
+                except ValueError:
+                    util_percent = 0
+                devices.append({
+                    "index": row[0].strip(),
+                    "uuid": row[1].strip(),
+                    "name": row[2].strip(),
+                    "memory_total_bytes": total_mb * 1024 * 1024,
+                    "memory_used_bytes": used_mb * 1024 * 1024,
+                    "utilization_gpu": util_percent,
+                    "driver_version": row[6].strip(),
+                })
+            if not devices:
+                missing.append("未检测到 NVIDIA GPU 设备")
+                suggestions.append("确认服务器已安装 NVIDIA GPU 且驱动已正确加载。")
+
+    if not toolkit_installed:
+        missing.append("未检测到 nvidia-container-toolkit / nvidia runtime")
+        suggestions.append("安装 nvidia-container-toolkit，并按官方步骤重启 Docker。")
+    if not docker_has_gpus_flag:
+        missing.append("当前 Docker CLI 不支持 --gpus 参数")
+        suggestions.append("升级到支持 --gpus 的 Docker 版本，或检查 Docker 安装是否完整。")
+    if docker_info_error:
+        suggestions.append(f"Docker 信息读取失败: {docker_info_error}")
+
+    supported = driver_installed and toolkit_installed and docker_has_gpus_flag and bool(devices)
+    return {
+        "ok": True,
+        "supported": supported,
+        "driver_installed": driver_installed,
+        "toolkit_installed": toolkit_installed,
+        "docker_supports_gpus": docker_has_gpus_flag,
+        "devices": devices,
+        "missing": missing,
+        "suggestions": suggestions,
+        "runtimes": sorted(runtimes.keys()),
+        "recommended_actions": ["continue_install", "exit"] if missing else [],
+        "auto_install_supported": False,
+        "docker_info_error": docker_info_error,
+    }
 
 @app.errorhandler(Exception)
 def handle_exception(exc):
@@ -315,6 +589,54 @@ def list_containers():
         else:
             print(f"[WARN] 读取容器详情失败 {name}: {inspect_error}")
     return jsonify({"ok": True, "containers": containers})
+
+@app.route("/containers/metrics")
+@auth_required
+def container_metrics():
+    all_names, all_error = list_managed_container_names(include_stopped=True)
+    if all_names is None:
+        return jsonify({"ok": False, "containers": [], "error": all_error}), 500
+
+    running_names, running_error = list_managed_container_names(include_stopped=False)
+    if running_names is None:
+        running_names = []
+
+    running_stats, stats_error = collect_running_container_stats(running_names)
+    containers = []
+    errors = []
+    if running_error:
+        errors.append(running_error)
+    if stats_error:
+        errors.append(stats_error)
+
+    for name in all_names:
+        details, inspect_error = inspect_container_details(name)
+        if not details:
+            errors.append(f"{name}: {inspect_error}")
+            continue
+        size_info, size_error = inspect_container_size(name)
+        if size_error:
+            errors.append(f"{name}: {size_error}")
+            size_info = {"disk_rw_bytes": 0, "disk_rootfs_bytes": 0}
+        runtime_stats = running_stats.get(name, {})
+        containers.append({
+            "id": details.get("id", ""),
+            "name": name,
+            "status": details.get("status", "unknown"),
+            "cpu_percent": runtime_stats.get("cpu_percent", 0.0),
+            "memory_used_bytes": runtime_stats.get("memory_used_bytes", 0),
+            "memory_limit_bytes": runtime_stats.get("memory_limit_bytes", 0),
+            "pids_current": runtime_stats.get("pids_current"),
+            "disk_rw_bytes": size_info.get("disk_rw_bytes", 0),
+            "disk_rootfs_bytes": size_info.get("disk_rootfs_bytes", 0),
+        })
+    containers.sort(key=lambda item: item.get("name", ""))
+    return jsonify({
+        "ok": True,
+        "containers": containers,
+        "errors": errors,
+        "collected_at": now(),
+    })
 
 @app.route("/containers/create", methods=["POST"])
 @auth_required
@@ -691,15 +1013,22 @@ def container_status(name):
 @auth_required
 def sysinfo():
     docker_ok, docker_version = docker_available()
+    storage = collect_storage_capabilities()
     return jsonify({
         "ok":             True,
         "cpu_cores":      os.cpu_count() or 1,
         "memory_bytes":   memory_bytes(),
         "docker_ok":      docker_ok,
         "docker_version": docker_version if docker_ok else "unavailable",
+        "storage":        storage,
         "workdir":        str(WORKDIR),
         "time":       now()
     })
+
+@app.route("/gpu/info")
+@auth_required
+def gpu_info():
+    return jsonify(collect_gpu_info())
 
 @app.route("/checks", methods=["GET", "POST"])
 @auth_required
@@ -707,6 +1036,8 @@ def checks():
     body = request.get_json(silent=True) or {}
     docker_ok, docker_version = docker_available()
     warnings = []
+    storage = collect_storage_capabilities()
+    gpu = collect_gpu_info()
 
     if not str(WORKDIR).split("/")[-1].startswith("."):
         warnings.append("Agent 工作目录不是隐藏目录")
@@ -743,6 +1074,8 @@ def checks():
         "memory_bytes": memory_bytes(),
         "managed_containers": len([line for line in privileged.splitlines() if line.strip()]),
         "mount_roots": mount_results,
+        "storage": storage,
+        "gpu": gpu,
         "warnings": warnings,
         "time": now(),
     })

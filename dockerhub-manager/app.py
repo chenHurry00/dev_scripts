@@ -652,6 +652,23 @@ def api_server_defaults(sid):
         "mount_roots": server.get("mount_roots", [])
     })
 
+@app.route("/api/servers/<sid>/gpu", methods=["GET"])
+@login_required
+def api_server_gpu(sid):
+    data = load_data()
+    server = data["servers"].get(sid)
+    if not server:
+        return jsonify({"error": "服务器不存在"}), 404
+    result = call_agent(server, "/gpu/info", timeout=20)
+    if result.get("status_code", 200) >= 400 or result.get("error"):
+        return jsonify({
+            "ok": False,
+            "error": result.get("error") or "GPU 能力检查失败",
+            "gpu": {}
+        }), 502
+    result["server_id"] = sid
+    return jsonify(result)
+
 @app.route("/api/servers/<sid>", methods=["DELETE"])
 @login_required
 @role_required("admin")
@@ -754,6 +771,43 @@ def api_containers():
             })
     containers.sort(key=lambda item: item.get("created_at", ""), reverse=True)
     return jsonify({"containers": containers})
+
+@app.route("/api/containers/metrics", methods=["GET"])
+@login_required
+def api_container_metrics():
+    data = load_data()
+    metrics = {}
+    errors = {}
+    for server_id, server in data.get("servers", {}).items():
+        result = call_agent(server, "/containers/metrics", timeout=60)
+        if result.get("status_code", 200) >= 400 or result.get("error"):
+            errors[server_id] = result.get("error") or f"Agent HTTP {result.get('status_code', 500)}"
+            continue
+        for item in result.get("containers", []):
+            name = item.get("name", "")
+            if not name:
+                continue
+            cid, record = find_container_record(data, server_id, name, item.get("id", ""))
+            if not cid or not record:
+                continue
+            metrics[cid] = {
+                "container_id": cid,
+                "server_id": server_id,
+                "name": name,
+                "status": item.get("status", record.get("status", "unknown")),
+                "cpu_percent": item.get("cpu_percent", 0),
+                "memory_used_bytes": item.get("memory_used_bytes", 0),
+                "memory_limit_bytes": item.get("memory_limit_bytes", 0),
+                "pids_current": item.get("pids_current"),
+                "disk_rw_bytes": item.get("disk_rw_bytes", 0),
+                "disk_rootfs_bytes": item.get("disk_rootfs_bytes", 0),
+            }
+    return jsonify({
+        "ok": True,
+        "metrics": metrics,
+        "errors": errors,
+        "collected_at": datetime.now().isoformat(timespec="seconds"),
+    })
 
 @app.route("/api/containers", methods=["POST"])
 @login_required

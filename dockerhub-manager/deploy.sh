@@ -39,6 +39,66 @@ if [[ "$OPEN_FIREWALL" == "1" ]]; then
   esac
 fi
 
+run_agent_capability_check() {
+  ssh "$SSH_TARGET" "AGENT_TOKEN='$TOKEN' AGENT_PORT='$AGENT_PORT' python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+port = os.environ['AGENT_PORT']
+token = os.environ['AGENT_TOKEN']
+base = f'http://127.0.0.1:{port}'
+
+def fetch(path):
+    req = urllib.request.Request(base + path, headers={'X-Agent-Token': token})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+try:
+    checks = fetch('/checks')
+    gpu = fetch('/gpu/info')
+except Exception as exc:
+    print(f'AGENT_CAPABILITY_ERROR: {exc}')
+    sys.exit(2)
+
+storage = checks.get('storage') or {}
+driver = storage.get('driver') or 'unknown'
+backing = storage.get('backing_filesystem') or 'unknown'
+quota = ','.join(storage.get('quota_flags') or []) or 'none'
+
+print('Agent 能力摘要：')
+print(f'  - Docker 存储驱动: {driver}')
+if storage.get('supports_rootfs_limit'):
+    print(f'  - 可写层磁盘限额: 支持（backing fs: {backing}, quota: {quota}）')
+else:
+    reason = storage.get('reason') or '当前环境不支持'
+    print(f'  - 可写层磁盘限额: 不支持（{reason}）')
+
+devices = gpu.get('devices') or []
+if gpu.get('supported'):
+    print(f'  - GPU 容器支持: 支持（检测到 {len(devices)} 张 GPU）')
+    if devices:
+        names = ', '.join(f\"{item.get('index', '?')}:{item.get('name', 'unknown')}\" for item in devices)
+        print(f'  - GPU 列表: {names}')
+    print('AGENT_GPU_STATUS: supported')
+else:
+    print('  - GPU 容器支持: 未就绪')
+    missing = gpu.get('missing') or []
+    suggestions = gpu.get('suggestions') or []
+    if missing:
+        print('  - 缺失项:')
+        for item in missing:
+            print(f'    * {item}')
+    if suggestions:
+        print('  - 建议:')
+        for item in suggestions:
+            print(f'    * {item}')
+    print('  - 后续动作: 继续安装 Agent / 退出脚本')
+    print('AGENT_GPU_STATUS: missing')
+PY"
+}
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  DockerHub Agent 部署"
 echo "  SSH 目标:    $SSH_TARGET"
@@ -51,7 +111,7 @@ echo "  - 容器 SSH:  TCP 32000-32999，按实际使用者来源网段放行"
 echo "  - 脚本不会自动修改 1Panel、云安全组或容器 SSH 端口规则"
 echo ""
 
-echo "[1/4] 上传 Agent 脚本..."
+echo "[1/5] 上传 Agent 脚本..."
 ssh "$SSH_TARGET" "sudo mkdir -p '$REMOTE_DIR'"
 scp "agent/agent.py" "$SSH_TARGET:/tmp/dockerhub-agent.py"
 scp "agent/uninstall.sh" "$SSH_TARGET:/tmp/dockerhub-agent-uninstall.sh"
@@ -61,7 +121,7 @@ ssh "$SSH_TARGET" "
   sudo chmod 755 '$REMOTE_DIR/agent.py' '$REMOTE_DIR/uninstall.sh'
 "
 
-echo "[2/4] 安装依赖..."
+echo "[2/5] 安装依赖..."
 ssh "$SSH_TARGET" "
   set -e
 
@@ -105,7 +165,7 @@ ssh "$SSH_TARGET" "
   echo '  ✓ 依赖检查完成'
 "
 
-echo "[3/4] 注册 systemd 服务..."
+echo "[3/5] 注册 systemd 服务..."
 SERVICE_FILE="/tmp/dockerhub-agent.service"
 cat > "$SERVICE_FILE" << EOF
 [Unit]
@@ -161,12 +221,36 @@ if [[ "$OPEN_FIREWALL" == "1" ]]; then
   "
 fi
 
-echo "[4/4] 验证 Agent 连通性..."
+echo "[4/5] 验证 Agent 连通性..."
 HOST_FOR_CURL="${SSH_TARGET#*@}"
 sleep 2
 REMOTE_RESULT=$(ssh "$SSH_TARGET" "curl --noproxy '*' --connect-timeout 3 --max-time 5 -fsS 'http://127.0.0.1:${AGENT_PORT}/ping' 2>/dev/null || echo FAIL")
 EXTERNAL_RESULT=$(curl --noproxy '*' --connect-timeout 3 --max-time 5 -fsS "http://${HOST_FOR_CURL}:${AGENT_PORT}/ping" 2>/dev/null || echo "FAIL")
 if echo "$REMOTE_RESULT" | grep -q '"status"' && echo "$EXTERNAL_RESULT" | grep -q '"status"'; then
+  echo "[5/5] 检查 Agent 能力..."
+  CAPABILITY_OUTPUT="$(run_agent_capability_check 2>&1 || true)"
+  echo "$CAPABILITY_OUTPUT" | sed '/^AGENT_GPU_STATUS:/d'
+  if echo "$CAPABILITY_OUTPUT" | grep -q '^AGENT_CAPABILITY_ERROR:'; then
+    echo ""
+    echo "⚠ Agent 能力检查未完成，但基础部署与连通性验证已通过。"
+  elif echo "$CAPABILITY_OUTPUT" | grep -q 'AGENT_GPU_STATUS: missing'; then
+    echo ""
+    echo "⚠ 检测到当前服务器未满足 GPU 容器运行条件。"
+    echo "  Agent 已完成部署，但 GPU 功能暂不可用。"
+    if [[ -t 0 ]]; then
+      read -r -p "是否继续完成当前 Agent 安装并稍后手动处理 GPU？输入 continue 继续，其他退出: " CONTINUE_INSTALL
+      if [[ "$CONTINUE_INSTALL" != "continue" ]]; then
+        echo "已退出。当前 Agent 文件和服务已部署，如不需要可执行："
+        echo "  sudo bash ${REMOTE_DIR}/uninstall.sh"
+        exit 31
+      fi
+    else
+      echo "  当前为非交互模式，默认退出。"
+      echo "  如需保留当前部署结果，请重新执行并在交互模式下确认继续。"
+      exit 31
+    fi
+  fi
+
   echo ""
   echo "✓ Agent 部署成功"
   echo "  主机: ${HOST_FOR_CURL}"

@@ -599,6 +599,22 @@ td {
 td.td-hi { color: var(--text-hi); font-weight: 500; }
 td.td-mono { font-family: var(--mono); font-size: 12px; }
 
+.runtime-metrics {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-mid);
+  white-space: nowrap;
+}
+
+.runtime-metrics .metric-muted {
+  color: var(--text-lo);
+}
+
+.runtime-metrics .metric-danger {
+  color: var(--danger);
+}
+
 /* ═══════════════════════════════════════════════
    BADGES / PILLS
 ═══════════════════════════════════════════════ */
@@ -1218,6 +1234,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
                 <th>镜像</th>
                 <th>SSH 命令</th>
                 <th>创建时间</th>
+                <th>占用</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
@@ -1626,10 +1643,13 @@ const STATE = {
   role: '{{ role }}',
   servers: [],
   containers: [],
+  containerMetrics: {},
+  containerMetricsErrors: {},
   users: [],
   containerImages: {},
   editingServerId: null,
   editingContainerId: null,
+  containerMetricsTimer: null,
   imageTaskTimer: null,
   finishedImageTasks: {}
 };
@@ -1679,6 +1699,10 @@ function switchPanel(name) {
   if (name === 'images')     loadImagesPanel();
   if (name === 'users')      loadUsers();
   if (name === 'audit')      loadAuditLogs();
+}
+
+function isContainersPanelActive() {
+  return document.getElementById('panel-containers').classList.contains('active');
 }
 
 /* ═══════════════════════════════════════════════
@@ -1887,6 +1911,85 @@ function escapeHtml(value) {
   })[ch]);
 }
 
+function formatBytesCompact(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return '—';
+  if (value === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  const digits = size >= 100 || index === 0 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[index]}`;
+}
+
+function formatPercent(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '—';
+  return `${num >= 10 ? num.toFixed(0) : num.toFixed(1)}%`;
+}
+
+function renderContainerMetrics(container) {
+  if (container.status === 'missing') {
+    return '<div class="runtime-metrics"><span class="metric-muted">—</span></div>';
+  }
+  const error = STATE.containerMetricsErrors[container.server];
+  if (error) {
+    return '<div class="runtime-metrics"><span class="metric-danger">读取失败</span></div>';
+  }
+  const metric = STATE.containerMetrics[container.id];
+  if (!metric) {
+    return '<div class="runtime-metrics"><span class="metric-muted">采集中...</span></div>';
+  }
+  const memoryText = metric.memory_limit_bytes
+    ? `${formatBytesCompact(metric.memory_used_bytes)} / ${formatBytesCompact(metric.memory_limit_bytes)}`
+    : formatBytesCompact(metric.memory_used_bytes);
+  return `<div class="runtime-metrics">
+    <div>CPU ${formatPercent(metric.cpu_percent)}</div>
+    <div>MEM ${memoryText}</div>
+    <div>DISK ${formatBytesCompact(metric.disk_rw_bytes)}</div>
+  </div>`;
+}
+
+function renderContainersTable() {
+  const tbody = document.getElementById('ctr-table-body');
+  if (!STATE.containers.length) {
+    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">
+      <div class="empty-icon">⬡</div><div class="empty-title">暂无容器</div>
+    </div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = STATE.containers.map(c => `
+    <tr>
+      <td class="td-hi">${c.name}</td>
+      <td>${c.user || '—'}</td>
+      <td>${c.server || '—'}</td>
+      <td class="td-mono">${c.image}</td>
+      <td class="td-mono" style="font-size:11px">${c.ssh_cmd || '—'}</td>
+      <td style="font-size:11px;color:var(--text-lo)">${c.created_at ? c.created_at.slice(0,16) : '—'}</td>
+      <td>${renderContainerMetrics(c)}</td>
+      <td>${statusBadge(c.status)}</td>
+      <td>
+        ${c.status === 'missing'
+          ? '<span style="font-size:11px;color:var(--text-lo)">已失联</span>'
+          : `<button class="btn" onclick="openContainerResourceModal('${c.id}')">修改资源</button>`}
+        <button class="btn btn-danger" onclick="delContainer('${c.id}')">删除</button>
+      </td>
+    </tr>`).join('');
+}
+
+function ensureContainerMetricsTimer() {
+  if (STATE.containerMetricsTimer) return;
+  STATE.containerMetricsTimer = setInterval(() => {
+    if (isContainersPanelActive()) {
+      loadContainerMetrics({ silent: true });
+    }
+  }, 5000);
+}
+
 function renderRegisteredMounts(roots) {
   const container = document.getElementById('ctr-registered-mounts');
   const user = document.getElementById('ctr-user').value || document.getElementById('ctr-name').value || 'user';
@@ -1986,29 +2089,27 @@ async function loadContainers() {
   const data = await api('/api/containers');
   STATE.containers = data.containers || [];
   document.getElementById('badge-ctr').textContent = STATE.containers.length;
-  const tbody = document.getElementById('ctr-table-body');
-  if (!STATE.containers.length) {
-    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">
-      <div class="empty-icon">⬡</div><div class="empty-title">暂无容器</div>
-    </div></td></tr>`;
+  renderContainersTable();
+  ensureContainerMetricsTimer();
+  if (STATE.containers.length) {
+    await loadContainerMetrics({ silent: true });
+  } else {
+    STATE.containerMetrics = {};
+    STATE.containerMetricsErrors = {};
+  }
+}
+
+async function loadContainerMetrics({ silent = false } = {}) {
+  const data = await api('/api/containers/metrics');
+  if (!data.ok && data.error) {
+    if (!silent) toast(data.error, 'danger');
     return;
   }
-  tbody.innerHTML = STATE.containers.map(c => `
-    <tr>
-      <td class="td-hi">${c.name}</td>
-      <td>${c.user || '—'}</td>
-      <td>${c.server || '—'}</td>
-      <td class="td-mono">${c.image}</td>
-      <td class="td-mono" style="font-size:11px">${c.ssh_cmd || '—'}</td>
-      <td style="font-size:11px;color:var(--text-lo)">${c.created_at ? c.created_at.slice(0,16) : '—'}</td>
-      <td>${statusBadge(c.status)}</td>
-      <td>
-        ${c.status === 'missing'
-          ? '<span style="font-size:11px;color:var(--text-lo)">已失联</span>'
-          : `<button class="btn" onclick="openContainerResourceModal('${c.id}')">修改资源</button>`}
-        <button class="btn btn-danger" onclick="delContainer('${c.id}')">删除</button>
-      </td>
-    </tr>`).join('');
+  STATE.containerMetrics = data.metrics || {};
+  STATE.containerMetricsErrors = data.errors || {};
+  if (isContainersPanelActive()) {
+    renderContainersTable();
+  }
 }
 
 async function loadServers() {
