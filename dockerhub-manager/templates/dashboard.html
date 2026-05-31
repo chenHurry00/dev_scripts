@@ -604,7 +604,8 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   font-size: 11px;
   line-height: 1.65;
   color: var(--text-mid);
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .runtime-metrics .metric-muted {
@@ -2112,6 +2113,90 @@ function formatPercent(value) {
   return `${num >= 10 ? num.toFixed(0) : num.toFixed(1)}%`;
 }
 
+function normalizeGpuDeviceIds(values) {
+  return [...new Set((values || []).map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+function getConfiguredContainerGpuDevices(container, metric) {
+  const metricDevices = metric && metric.gpu && Array.isArray(metric.gpu.configured_devices)
+    ? metric.gpu.configured_devices
+    : [];
+  if (metricDevices.length) {
+    return normalizeGpuDeviceIds(metricDevices);
+  }
+  return normalizeGpuDeviceIds(container.gpu_devices || []);
+}
+
+function getSharedGpuContainerNames(container, configuredDevices) {
+  if (!configuredDevices.length) return [];
+  const currentDevices = new Set(configuredDevices.map(device => String(device)));
+  return STATE.containers
+    .filter(other =>
+      other.id !== container.id &&
+      other.server === container.server &&
+      other.gpu_enabled
+    )
+    .filter(other => {
+      const otherMetric = STATE.containerMetrics[other.id];
+      const otherDevices = getConfiguredContainerGpuDevices(other, otherMetric);
+      return otherDevices.some(device => currentDevices.has(device));
+    })
+    .map(other => other.name || other.id);
+}
+
+function renderContainerGpuMetrics(container, metric) {
+  const gpu = metric && metric.gpu ? metric.gpu : {};
+  const enabled = Boolean(container.gpu_enabled || gpu.enabled);
+  if (!enabled) return '';
+
+  const configuredDevices = getConfiguredContainerGpuDevices(container, metric);
+  const activeDevices = Array.isArray(gpu.devices) ? gpu.devices : [];
+  const activeDeviceIds = normalizeGpuDeviceIds(activeDevices.map(device => device.id));
+  const displayDevices = activeDeviceIds.length ? activeDeviceIds : configuredDevices;
+  const lines = [];
+
+  let topLine = `GPU ${escapeHtml(displayDevices.length ? displayDevices.join(',') : '已启用')}`;
+  const totalMemoryBytes = activeDevices.reduce(
+    (sum, device) => sum + Number(device.container_memory_used_bytes || 0),
+    0
+  );
+  if (totalMemoryBytes > 0) {
+    topLine += ` | VRAM ${escapeHtml(formatBytesCompact(totalMemoryBytes))}`;
+  }
+  if (gpu.utilization_supported && activeDevices.length) {
+    topLine += ` | GPU ${escapeHtml(formatPercent(gpu.total_util_percent || 0))}`;
+  } else if (!gpu.utilization_supported && (activeDevices.length || configuredDevices.length)) {
+    topLine += ' | GPU% 仅显存';
+  }
+  lines.push(`<div>${topLine}</div>`);
+
+  if (!activeDevices.length) {
+    lines.push('<div class="metric-muted">当前无 GPU 进程</div>');
+  } else {
+    const details = activeDevices.map(device => {
+      const memoryText = formatBytesCompact(device.container_memory_used_bytes || 0);
+      const utilText = gpu.utilization_supported
+        ? formatPercent(device.container_util_percent || 0)
+        : '仅显存';
+      return `#${escapeHtml(device.id)} ${escapeHtml(memoryText)} / ${escapeHtml(utilText)}`;
+    }).join(' · ');
+    lines.push(`<div class="metric-muted">${details}</div>`);
+  }
+
+  if (!gpu.utilization_supported && gpu.utilization_reason) {
+    lines.push(`<div class="metric-muted">${escapeHtml(gpu.utilization_reason)}</div>`);
+  }
+
+  const sharedContainers = getSharedGpuContainerNames(container, configuredDevices.length ? configuredDevices : displayDevices);
+  if (sharedContainers.length) {
+    const preview = sharedContainers.slice(0, 2).map(name => escapeHtml(name)).join(', ');
+    const suffix = sharedContainers.length > 2 ? ` 等 ${sharedContainers.length} 个容器` : '';
+    lines.push(`<div class="metric-muted">共享: ${preview}${suffix}</div>`);
+  }
+
+  return lines.join('');
+}
+
 function renderContainerMetrics(container) {
   if (container.status === 'missing') {
     return '<div class="runtime-metrics"><span class="metric-muted">—</span></div>';
@@ -2127,10 +2212,12 @@ function renderContainerMetrics(container) {
   const memoryText = metric.memory_limit_bytes
     ? `${formatBytesCompact(metric.memory_used_bytes)} / ${formatBytesCompact(metric.memory_limit_bytes)}`
     : formatBytesCompact(metric.memory_used_bytes);
+  const gpuHtml = renderContainerGpuMetrics(container, metric);
   return `<div class="runtime-metrics">
     <div>CPU ${formatPercent(metric.cpu_percent)}</div>
     <div>MEM ${memoryText}</div>
     <div>DISK ${formatBytesCompact(metric.disk_rw_bytes)}</div>
+    ${gpuHtml}
   </div>`;
 }
 

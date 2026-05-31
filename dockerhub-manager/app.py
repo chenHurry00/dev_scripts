@@ -840,6 +840,7 @@ def api_container_metrics():
                 "pids_current": item.get("pids_current"),
                 "disk_rw_bytes": item.get("disk_rw_bytes", 0),
                 "disk_rootfs_bytes": item.get("disk_rootfs_bytes", 0),
+                "gpu": item.get("gpu", {}),
             }
     return jsonify({
         "ok": True,

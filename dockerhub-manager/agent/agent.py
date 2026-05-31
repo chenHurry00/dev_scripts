@@ -303,6 +303,219 @@ def parse_mem_usage_bytes(value):
     limit = parse_size_to_bytes(parts[1]) if len(parts) > 1 else 0
     return used, limit
 
+def parse_csv_int(value):
+    raw = str(value or "").strip()
+    if not raw or raw in {"-", "N/A", "[Not Supported]"}:
+        return None
+    try:
+        return int(float(raw))
+    except ValueError:
+        return None
+
+def parse_label_csv(value):
+    items = []
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if item and item not in items:
+            items.append(item)
+    return items
+
+def container_gpu_enabled(labels):
+    return str((labels or {}).get("manager.gpu_enabled", "")).strip().lower() == "true"
+
+def extract_container_id_candidates(cgroup_text):
+    text = str(cgroup_text or "").lower()
+    matches = re.findall(r"(?:docker[-/]|cri-containerd-|containerd-)?([0-9a-f]{12,64})(?:\.scope)?", text)
+    candidates = []
+    for item in matches:
+        token = item.strip()
+        if token and token not in candidates:
+            candidates.append(token)
+    return candidates
+
+def resolve_container_name_from_pid(pid, managed_container_ids):
+    try:
+        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
+            cgroup_text = f.read()
+    except OSError:
+        return None
+    candidates = extract_container_id_candidates(cgroup_text)
+    if not candidates:
+        return None
+    full_ids = {
+        key: value for key, value in managed_container_ids.items()
+        if len(key) == 64
+    }
+    for token in candidates:
+        matched = managed_container_ids.get(token)
+        if matched:
+            return matched
+        short_token = token[:12]
+        matched = managed_container_ids.get(short_token)
+        if matched:
+            return matched
+        for full_id, name in full_ids.items():
+            if full_id.startswith(token):
+                return name
+    return None
+
+def list_gpu_compute_processes(device_by_uuid):
+    if not device_by_uuid:
+        return [], None
+    code, out, err = run([
+        "nvidia-smi",
+        "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
+        "--format=csv,noheader,nounits",
+    ], timeout=20)
+    if code != 0:
+        message = err or out or "nvidia-smi 进程列表读取失败"
+        if "no running compute processes found" in message.lower():
+            return [], None
+        return [], message
+    processes = []
+    for raw_line in out.splitlines():
+        line = raw_line.strip()
+        if not line or line.lower().startswith("no running compute processes found"):
+            continue
+        row = next(csv.reader([line]), [])
+        if len(row) < 3:
+            continue
+        gpu_uuid = row[0].strip()
+        pid = parse_csv_int(row[1])
+        used_mb = parse_csv_int(row[2])
+        device = device_by_uuid.get(gpu_uuid)
+        if pid is None or not device:
+            continue
+        processes.append({
+            "gpu_uuid": gpu_uuid,
+            "gpu_index": str(device.get("index", "")).strip(),
+            "pid": pid,
+            "used_gpu_memory_bytes": max(0, used_mb or 0) * 1024 * 1024,
+        })
+    return processes, None
+
+def list_gpu_process_utilization():
+    code, out, err = run(["nvidia-smi", "pmon", "-c", "1", "-s", "um"], timeout=20)
+    if code != 0:
+        reason = (err or out or "nvidia-smi pmon 执行失败").strip()
+        return {}, False, reason
+    usage = {}
+    for raw_line in out.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        gpu_index = parts[0].strip()
+        pid_text = parts[1].strip()
+        if not pid_text.isdigit():
+            continue
+        util_value = parse_csv_int(parts[3])
+        if util_value is None:
+            continue
+        key = (gpu_index, int(pid_text))
+        usage[key] = usage.get(key, 0) + max(0, util_value)
+    return usage, True, ""
+
+def collect_container_gpu_metrics(managed_details):
+    metrics = {}
+    gpu_enabled_names = []
+    for name, details in managed_details.items():
+        labels = details.get("labels") or {}
+        enabled = container_gpu_enabled(labels)
+        configured_devices = parse_label_csv(labels.get("manager.gpu_devices", ""))
+        metrics[name] = {
+            "enabled": enabled,
+            "driver": labels.get("manager.gpu_driver", ""),
+            "configured_devices": configured_devices,
+            "devices": [],
+            "utilization_supported": False,
+            "utilization_reason": "",
+            "total_memory_used_bytes": 0,
+            "total_util_percent": None,
+            "active_process_count": 0,
+        }
+        if enabled:
+            gpu_enabled_names.append(name)
+    if not gpu_enabled_names:
+        return metrics, []
+
+    gpu_info = collect_gpu_info()
+    device_list = gpu_info.get("devices", []) or []
+    if not device_list:
+        reason = (gpu_info.get("missing") or [gpu_info.get("docker_info_error") or "当前未检测到 GPU 设备"])[0]
+        for name in gpu_enabled_names:
+            metrics[name]["utilization_reason"] = str(reason)
+        return metrics, []
+
+    device_by_uuid = {
+        str(device.get("uuid", "")).strip(): device
+        for device in device_list
+        if str(device.get("uuid", "")).strip()
+    }
+    processes, process_error = list_gpu_compute_processes(device_by_uuid)
+    util_by_process, util_supported, util_reason = list_gpu_process_utilization()
+    warnings = []
+    if process_error:
+        warnings.append(process_error)
+
+    managed_container_ids = {}
+    for name, details in managed_details.items():
+        container_id = str(details.get("id", "")).strip().lower()
+        if not container_id:
+            continue
+        managed_container_ids[container_id] = name
+        managed_container_ids.setdefault(container_id[:12], name)
+
+    pid_cache = {}
+    for process in processes:
+        pid = process["pid"]
+        if pid not in pid_cache:
+            pid_cache[pid] = resolve_container_name_from_pid(pid, managed_container_ids)
+        container_name = pid_cache.get(pid)
+        if not container_name or container_name not in metrics:
+            continue
+        metric = metrics[container_name]
+        if not metric.get("enabled"):
+            continue
+        device_uuid = process["gpu_uuid"]
+        device = device_by_uuid.get(device_uuid)
+        if not device:
+            continue
+        device_index = str(device.get("index", "")).strip()
+        device_entry = next((item for item in metric["devices"] if item.get("id") == device_index), None)
+        if not device_entry:
+            device_entry = {
+                "id": device_index,
+                "uuid": device_uuid,
+                "name": device.get("name", ""),
+                "container_memory_used_bytes": 0,
+                "container_util_percent": 0,
+                "device_util_percent": device.get("utilization_gpu", 0),
+                "device_memory_used_bytes": device.get("memory_used_bytes", 0),
+                "device_memory_total_bytes": device.get("memory_total_bytes", 0),
+            }
+            metric["devices"].append(device_entry)
+        device_entry["container_memory_used_bytes"] += process["used_gpu_memory_bytes"]
+        util_value = util_by_process.get((device_index, pid))
+        if util_value is not None:
+            device_entry["container_util_percent"] += util_value
+        metric["active_process_count"] += 1
+
+    for name, metric in metrics.items():
+        if not metric.get("enabled"):
+            continue
+        metric["devices"].sort(key=lambda item: item.get("id", ""))
+        metric["utilization_supported"] = util_supported
+        metric["utilization_reason"] = "" if util_supported else util_reason
+        metric["total_memory_used_bytes"] = sum(item.get("container_memory_used_bytes", 0) for item in metric["devices"])
+        if util_supported:
+            metric["total_util_percent"] = sum(item.get("container_util_percent", 0) for item in metric["devices"])
+        else:
+            metric["total_util_percent"] = None
+    return metrics, warnings
+
 def list_managed_container_names(include_stopped=True):
     cmd = ["docker", "ps"]
     if include_stopped:
@@ -665,11 +878,18 @@ def container_metrics():
     if stats_error:
         errors.append(stats_error)
 
+    managed_details = {}
     for name in all_names:
         details, inspect_error = inspect_container_details(name)
         if not details:
             errors.append(f"{name}: {inspect_error}")
             continue
+        managed_details[name] = details
+
+    gpu_metrics, gpu_errors = collect_container_gpu_metrics(managed_details)
+    errors.extend(gpu_errors)
+
+    for name, details in managed_details.items():
         size_info, size_error = inspect_container_size(name)
         if size_error:
             errors.append(f"{name}: {size_error}")
@@ -685,6 +905,17 @@ def container_metrics():
             "pids_current": runtime_stats.get("pids_current"),
             "disk_rw_bytes": size_info.get("disk_rw_bytes", 0),
             "disk_rootfs_bytes": size_info.get("disk_rootfs_bytes", 0),
+            "gpu": gpu_metrics.get(name, {
+                "enabled": False,
+                "driver": "",
+                "configured_devices": [],
+                "devices": [],
+                "utilization_supported": False,
+                "utilization_reason": "",
+                "total_memory_used_bytes": 0,
+                "total_util_percent": None,
+                "active_process_count": 0,
+            }),
         })
     containers.sort(key=lambda item: item.get("name", ""))
     return jsonify({
