@@ -755,6 +755,62 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   line-height: 1.5;
 }
 
+.resource-card {
+  background: linear-gradient(180deg, var(--bg-panel), var(--bg-surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-bottom: 18px;
+}
+
+.resource-card-title {
+  font-family: var(--sans);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-hi);
+  line-height: 1.1;
+}
+
+.resource-card-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-mid);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.resource-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.resource-card-item {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.resource-card-label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-lo);
+  text-transform: uppercase;
+}
+
+.resource-card-value {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-hi);
+  line-height: 1.2;
+}
+
 .check-list {
   display: grid;
   gap: 8px;
@@ -946,6 +1002,10 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   }
 
   .stat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .resource-card-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -1505,6 +1565,55 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   </div>
 </div>
 
+<!-- ═══════ MODAL: 修改容器资源 ═══════ -->
+<div class="modal-overlay" id="modal-edit-ctr-resource">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">修改容器资源</div>
+      <button class="modal-close" onclick="closeModal('modal-edit-ctr-resource')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="resource-card">
+        <div class="resource-card-title" id="edit-ctr-resource-name">—</div>
+        <div class="resource-card-meta" id="edit-ctr-resource-meta">—</div>
+        <div class="resource-card-grid">
+          <div class="resource-card-item">
+            <span class="resource-card-label">当前 CPU</span>
+            <span class="resource-card-value" id="edit-ctr-resource-current-cpu">—</span>
+          </div>
+          <div class="resource-card-item">
+            <span class="resource-card-label">当前内存</span>
+            <span class="resource-card-value" id="edit-ctr-resource-current-mem">—</span>
+          </div>
+          <div class="resource-card-item">
+            <span class="resource-card-label">当前 PIDs</span>
+            <span class="resource-card-value" id="edit-ctr-resource-current-pids">—</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">CPU 限制（核）</label>
+          <input class="form-input" type="text" id="edit-ctr-resource-cpu" placeholder="1">
+        </div>
+        <div class="form-field">
+          <label class="form-label">内存限制</label>
+          <input class="form-input" type="text" id="edit-ctr-resource-mem" placeholder="8g">
+        </div>
+      </div>
+      <div class="form-field" style="margin-bottom:0">
+        <label class="form-label">PIDs 限制</label>
+        <input class="form-input" type="number" id="edit-ctr-resource-pids" placeholder="512" min="1">
+        <div class="form-hint">修改后会直接下发到目标服务器上的 Docker 容器。</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-edit-ctr-resource')">取消</button>
+      <button class="btn btn-primary" id="edit-ctr-resource-submit" onclick="saveContainerResources()">保存修改</button>
+    </div>
+  </div>
+</div>
+
 <!-- ═══════ TOAST ═══════ -->
 <div id="toast-container"></div>
 
@@ -1520,6 +1629,7 @@ const STATE = {
   users: [],
   containerImages: {},
   editingServerId: null,
+  editingContainerId: null,
   imageTaskTimer: null,
   finishedImageTasks: {}
 };
@@ -1575,7 +1685,14 @@ function switchPanel(name) {
    MODAL
 ═══════════════════════════════════════════════ */
 function openModal(id) { document.getElementById(id).classList.add('open'); }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+  if (id === 'modal-edit-ctr-resource') {
+    STATE.editingContainerId = null;
+    document.getElementById('edit-ctr-resource-submit').disabled = false;
+    document.getElementById('edit-ctr-resource-submit').textContent = '保存修改';
+  }
+}
 document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) closeModal(el.id); });
 });
@@ -1888,7 +2005,7 @@ async function loadContainers() {
       <td>
         ${c.status === 'missing'
           ? '<span style="font-size:11px;color:var(--text-lo)">已失联</span>'
-          : `<button class="btn" onclick="updateResources('${c.id}', '${c.cpu_limit || ''}', '${c.mem_limit || ''}', '${c.pids_limit || 512}')">资源</button>`}
+          : `<button class="btn" onclick="openContainerResourceModal('${c.id}')">修改资源</button>`}
         <button class="btn btn-danger" onclick="delContainer('${c.id}')">删除</button>
       </td>
     </tr>`).join('');
@@ -2129,19 +2246,59 @@ async function createContainer() {
   }
 }
 
-async function updateResources(id, cpu, mem, pids) {
-  const nextCpu = prompt('CPU 核数', cpu || '1');
-  if (nextCpu === null) return;
-  const nextMem = prompt('内存限制，例如 8g', mem || '1g');
-  if (nextMem === null) return;
-  const nextPids = prompt('PIDs 限制', pids || '512');
-  if (nextPids === null) return;
-  const res = await api(`/api/containers/${id}/resources`, {
+function openContainerResourceModal(id) {
+  const container = STATE.containers.find(item => item.id === id);
+  if (!container) {
+    toast('未找到容器信息，请先刷新列表', 'danger');
+    return;
+  }
+  STATE.editingContainerId = id;
+  document.getElementById('edit-ctr-resource-name').textContent = container.name || id;
+  document.getElementById('edit-ctr-resource-meta').textContent = [
+    container.user || '未分配使用者',
+    container.server || '未知服务器',
+    container.image || '未记录镜像'
+  ].join(' / ');
+  document.getElementById('edit-ctr-resource-current-cpu').textContent = container.cpu_limit || '1';
+  document.getElementById('edit-ctr-resource-current-mem').textContent = container.mem_limit || '1g';
+  document.getElementById('edit-ctr-resource-current-pids').textContent = String(container.pids_limit || 512);
+  document.getElementById('edit-ctr-resource-cpu').value = container.cpu_limit || '1';
+  document.getElementById('edit-ctr-resource-mem').value = container.mem_limit || '1g';
+  document.getElementById('edit-ctr-resource-pids').value = container.pids_limit || 512;
+  openModal('modal-edit-ctr-resource');
+}
+
+async function saveContainerResources() {
+  if (!STATE.editingContainerId) {
+    toast('未找到要修改的容器', 'danger');
+    return;
+  }
+  const cpu = document.getElementById('edit-ctr-resource-cpu').value.trim() || '1';
+  const mem = document.getElementById('edit-ctr-resource-mem').value.trim() || '1g';
+  const pidsValue = document.getElementById('edit-ctr-resource-pids').value.trim();
+  const pids = parseInt(pidsValue, 10);
+  if (!pidsValue || Number.isNaN(pids) || pids <= 0) {
+    toast('PIDs 限制必须是大于 0 的整数', 'warn');
+    return;
+  }
+  const submitBtn = document.getElementById('edit-ctr-resource-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '保存中...';
+  const res = await api(`/api/containers/${STATE.editingContainerId}/resources`, {
     method: 'PATCH',
-    body: JSON.stringify({ cpu_limit: nextCpu, mem_limit: nextMem, pids_limit: parseInt(nextPids) || 512 })
+    body: JSON.stringify({ cpu_limit: cpu, mem_limit: mem, pids_limit: pids })
   });
-  if (res.ok) { toast('资源配置已更新', 'ok'); loadContainers(); loadOverview(); loadAuditLogs(); }
-  else { toast(res.error || '资源更新失败', 'danger'); }
+  submitBtn.disabled = false;
+  submitBtn.textContent = '保存修改';
+  if (res.ok) {
+    closeModal('modal-edit-ctr-resource');
+    toast('资源配置已更新', 'ok');
+    loadContainers();
+    loadOverview();
+    loadAuditLogs();
+  } else {
+    toast(res.error || '资源更新失败', 'danger');
+  }
 }
 
 async function delContainer(id) {
