@@ -37,6 +37,7 @@ SSH_PORT_MIN = 32000
 SSH_PORT_MAX = 32999
 DEFAULT_SSH_IMAGE = "lscr.io/linuxserver/openssh-server:latest"
 PANEL_VERSION = "0.4.0"
+AUDIT_LOG_LIMIT = 2000
 
 def load_data():
     with data_lock:
@@ -57,16 +58,22 @@ def load_data():
     data.setdefault("containers", {})
     data.setdefault("templates", [])
     data.setdefault("audit_logs", [])
+    trim_audit_logs(data)
     migrate_empty_server_id(data)
     return data
 
 def save_data(data):
+    trim_audit_logs(data)
     payload = json.dumps(data, indent=2, ensure_ascii=False)
     with data_lock:
         DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
         temp_file = DATA_FILE.with_name(f".{DATA_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         temp_file.write_text(payload, encoding="utf-8")
         os.replace(temp_file, DATA_FILE)
+
+def trim_audit_logs(data):
+    data.setdefault("audit_logs", [])
+    data["audit_logs"] = data["audit_logs"][-AUDIT_LOG_LIMIT:]
 
 def migrate_empty_server_id(data):
     """迁移旧版允许保存的空服务器 ID，避免前端下拉框与未选择状态冲突。"""
@@ -89,7 +96,7 @@ def migrate_empty_server_id(data):
         "level": "WARN",
         "message": f"自动迁移空服务器 ID 为 {sid}",
     })
-    data["audit_logs"] = data["audit_logs"][-200:]
+    trim_audit_logs(data)
     save_data(data)
 
 def append_audit(data, message, level="INFO"):
@@ -98,7 +105,7 @@ def append_audit(data, message, level="INFO"):
         "level": level,
         "message": message,
     })
-    data["audit_logs"] = data["audit_logs"][-200:]
+    trim_audit_logs(data)
 
 def verify_password(stored_password, input_password):
     """兼容旧版明文密码，并在成功登录后迁移为哈希。"""
@@ -1300,7 +1307,7 @@ def api_del_user(uname):
 @login_required
 def api_logs():
     data = load_data()
-    return jsonify({"logs": data.get("audit_logs", [])[-200:]})
+    return jsonify({"logs": data.get("audit_logs", [])[-AUDIT_LOG_LIMIT:]})
 
 # ── 当前用户信息 ───────────────────────────────────────────────────────────
 @app.route("/api/me")
