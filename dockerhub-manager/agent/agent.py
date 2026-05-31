@@ -518,6 +518,37 @@ def validate_mounts(mounts, allowed_roots, puid, pgid):
 def valid_memory(value):
     return bool(re.match(r"^[1-9][0-9]*(m|g|M|G)?$", str(value or "")))
 
+def valid_size_limit(value):
+    return valid_memory(value)
+
+def normalize_size_limit(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.match(r"^([1-9][0-9]*)([mMgG]?)$", raw)
+    if not match:
+        return ""
+    number, suffix = match.groups()
+    return f"{number}{suffix.upper()}" if suffix else number
+
+def normalize_gpu_device_list(raw_devices):
+    if raw_devices in (None, "", []):
+        return []
+    if isinstance(raw_devices, str):
+        devices = [item.strip() for item in raw_devices.split(",")]
+    elif isinstance(raw_devices, list):
+        devices = [str(item).strip() for item in raw_devices]
+    else:
+        return []
+    normalized = []
+    for item in devices:
+        if not item:
+            continue
+        if not re.match(r"^[A-Za-z0-9._:-]+$", item):
+            return []
+        normalized.append(item)
+    return normalized
+
 def is_linuxserver_openssh(image):
     return "linuxserver/openssh-server" in image
 
@@ -668,6 +699,10 @@ def create_container():
     password_access = bool(body.get("password_access", False))
     ssh_password = body.get("ssh_password", "")
     allow_sudo = bool(body.get("allow_sudo", False))
+    gpu_enabled = bool(body.get("gpu_enabled", False))
+    gpu_devices = normalize_gpu_device_list(body.get("gpu_devices", []))
+    gpu_mode = str(body.get("gpu_mode", "shared") or "shared").strip() or "shared"
+    rootfs_limit = str(body.get("rootfs_limit", "") or "").strip()
     mounts   = body.get("mounts", [])
     allowed_roots = body.get("allowed_mount_roots", [])
 
@@ -693,9 +728,13 @@ def create_container():
         return jsonify({"ok": False, "error": "PIDs 限制无效"}), 400
     if puid <= 0 or pgid <= 0:
         return jsonify({"ok": False, "error": "PUID 和 PGID 必须为正整数"}), 400
+    if gpu_mode != "shared":
+        return jsonify({"ok": False, "error": "当前仅支持共享 GPU 模式"}), 400
+    if rootfs_limit:
+        if not valid_size_limit(rootfs_limit):
+            return jsonify({"ok": False, "error": "容器磁盘上限格式无效"}), 400
+        rootfs_limit = normalize_size_limit(rootfs_limit)
     linuxserver_openssh = is_linuxserver_openssh(image)
-    if password_access and not linuxserver_openssh:
-        return jsonify({"ok": False, "error": "密码登录仅支持默认 LinuxServer OpenSSH 镜像"}), 400
     if password_access and len(ssh_password) < 8:
         return jsonify({"ok": False, "error": "SSH 密码至少需要 8 位"}), 400
     if not public_key and not password_access:
@@ -704,6 +743,42 @@ def create_container():
     ok, error, normalized_mounts = validate_mounts(mounts, allowed_roots, puid, pgid)
     if not ok:
         return jsonify({"ok": False, "error": error}), 400
+
+    storage = collect_storage_capabilities()
+    if rootfs_limit and not storage.get("supports_rootfs_limit"):
+        return jsonify({
+            "ok": False,
+            "error": storage.get("reason") or "当前服务器不支持容器可写层磁盘限额",
+            "code": "rootfs_limit_unsupported",
+        }), 400
+
+    gpu_info = collect_gpu_info() if gpu_enabled else {"supported": False, "devices": []}
+    selected_gpu_devices = []
+    gpu_cli_value = ""
+    if gpu_enabled:
+        if not gpu_info.get("supported"):
+            return jsonify({
+                "ok": False,
+                "error": "当前服务器未满足 GPU 容器运行条件",
+                "code": "gpu_not_supported",
+                "missing": gpu_info.get("missing", []),
+            }), 400
+        available_devices = gpu_info.get("devices", [])
+        available_indices = [str(item.get("index", "")).strip() for item in available_devices if str(item.get("index", "")).strip()]
+        if not available_indices:
+            return jsonify({"ok": False, "error": "当前服务器未检测到可用 GPU", "code": "gpu_not_found"}), 400
+        if not gpu_devices:
+            selected_gpu_devices = available_indices
+        else:
+            invalid_devices = [item for item in gpu_devices if item not in available_indices]
+            if invalid_devices:
+                return jsonify({
+                    "ok": False,
+                    "error": f"所选 GPU 不存在: {', '.join(invalid_devices)}",
+                    "code": "gpu_device_invalid",
+                }), 400
+            selected_gpu_devices = gpu_devices
+        gpu_cli_value = "all" if set(selected_gpu_devices) == set(available_indices) else f"device={','.join(selected_gpu_devices)}"
 
     existing, _ = inspect_container_details(name)
     if existing:
@@ -724,6 +799,23 @@ def create_container():
     sudo_cmd = ""
     if allow_sudo:
         sudo_cmd = "apt-get install -y sudo -qq && usermod -aG sudo {user} && ".format(user=escaped_user)
+    password_bootstrap = (
+        "if grep -Eq '^#?PasswordAuthentication ' /etc/ssh/sshd_config; then "
+        "sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config; "
+        "else echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config; fi; "
+    )
+    if password_access:
+        password_bootstrap = (
+            "if [ -f /run/secrets/dockerhub_ssh_password ]; then "
+            "USER_PASSWORD=$(cat /run/secrets/dockerhub_ssh_password); "
+            "if [ -n \"$USER_PASSWORD\" ]; then "
+            f"printf '%s:%s\\n' {escaped_user} \"$USER_PASSWORD\" | chpasswd; "
+            "fi; "
+            "fi; "
+            "if grep -Eq '^#?PasswordAuthentication ' /etc/ssh/sshd_config; then "
+            "sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
+            "else echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; fi; "
+        )
 
     bootstrap = (
         "set -e; "
@@ -743,16 +835,16 @@ def create_container():
         "chmod 700 /home/{user}/.ssh; chmod 600 /home/{user}/.ssh/authorized_keys; "
         "{sudo_cmd}"
         "sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config; "
-        "sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config; "
+        "{password_bootstrap}"
         "grep -q '^PubkeyAuthentication yes' /etc/ssh/sshd_config || echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config; "
         "echo '[bootstrap] starting sshd'; "
         "/usr/sbin/sshd -D"
-    ).format(user=escaped_user, key=escaped_key, sudo_cmd=sudo_cmd)
+    ).format(user=escaped_user, key=escaped_key, sudo_cmd=sudo_cmd, password_bootstrap=password_bootstrap)
 
     container_ssh_port = 2222 if linuxserver_openssh else 22
     image_mode = "linuxserver-openssh" if linuxserver_openssh else "generic-bootstrap"
     password_file = None
-    if linuxserver_openssh and password_access:
+    if password_access:
         secret_dir = WORKDIR / "secrets"
         secret_dir.mkdir(mode=0o700, exist_ok=True)
         password_file = secret_dir / f"{safe_name(name)}.password"
@@ -781,8 +873,23 @@ def create_container():
             "--label", f"manager.login_user={login_user}",
             "--label", f"manager.container_ssh_port={container_ssh_port}",
             "--label", f"manager.image_mode={image_mode}",
+            "--label", f"manager.gpu_enabled={'true' if gpu_enabled else 'false'}",
+            "--label", f"manager.gpu_driver={'nvidia' if gpu_enabled else ''}",
+            "--label", f"manager.gpu_devices={','.join(selected_gpu_devices)}",
+            "--label", f"manager.gpu_mode={gpu_mode if gpu_enabled else ''}",
+            "--label", f"manager.rootfs_limit={rootfs_limit}",
             "--restart", "unless-stopped",
         ] + mount_args
+
+        if rootfs_limit:
+            cmd += ["--storage-opt", f"size={rootfs_limit}"]
+        if gpu_enabled:
+            cmd += ["--gpus", gpu_cli_value]
+        if password_file:
+            cmd += [
+                "--label", f"manager.password_file={password_file}",
+                "-v", f"{password_file}:/run/secrets/dockerhub_ssh_password:ro",
+            ]
 
         if linuxserver_openssh:
             config_volume = f"dockerhub_config_{safe_name(name)}"
@@ -797,10 +904,13 @@ def create_container():
                 "-e", f"SUDO_ACCESS={'true' if allow_sudo else 'false'}",
                 "-e", f"PASSWORD_ACCESS={'true' if password_access else 'false'}",
             ]
+            if gpu_enabled:
+                cmd += [
+                    "-e", f"NVIDIA_VISIBLE_DEVICES={','.join(selected_gpu_devices)}",
+                    "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+                ]
             if password_file:
                 cmd += [
-                    "--label", f"manager.password_file={password_file}",
-                    "-v", f"{password_file}:/run/secrets/dockerhub_ssh_password:ro",
                     "-e", "USER_PASSWORD_FILE=/run/secrets/dockerhub_ssh_password",
                 ]
             cmd.append(image)
@@ -853,6 +963,10 @@ def create_container():
         "name":         name,
         "ssh_port":     selected_ssh_port,
         "status":       "running",
+        "gpu_enabled":  gpu_enabled,
+        "gpu_devices":  selected_gpu_devices,
+        "gpu_mode":     gpu_mode if gpu_enabled else "",
+        "rootfs_limit": rootfs_limit,
     })
 
 @app.route("/containers/<name>/stop", methods=["POST"])

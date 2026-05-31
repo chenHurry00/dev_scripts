@@ -239,6 +239,15 @@ def build_ssh_cmd(login_user, ssh_port, ssh_host):
         return ""
     return f"ssh -p {ssh_port} {login_user}@{ssh_host}"
 
+def parse_label_bool(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+def parse_label_list(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
 def parse_agent_ssh_port(container):
     ssh_port = container.get("ssh_port")
     if ssh_port:
@@ -320,6 +329,11 @@ def register_container_record(
     cpu_limit="",
     mem_limit="",
     pids_limit=512,
+    gpu_enabled=None,
+    gpu_driver="",
+    gpu_devices=None,
+    gpu_mode="",
+    rootfs_limit="",
     agent_container_id="",
     status="running",
     created_at="",
@@ -351,6 +365,11 @@ def register_container_record(
         "cpu_limit": cpu_limit or record.get("cpu_limit", ""),
         "mem_limit": mem_limit or record.get("mem_limit", ""),
         "pids_limit": pids_limit or record.get("pids_limit", 512),
+        "gpu_enabled": bool(gpu_enabled if gpu_enabled is not None else record.get("gpu_enabled", False)),
+        "gpu_driver": gpu_driver or record.get("gpu_driver", ""),
+        "gpu_devices": list(gpu_devices if gpu_devices is not None else record.get("gpu_devices", [])),
+        "gpu_mode": gpu_mode or record.get("gpu_mode", ""),
+        "rootfs_limit": rootfs_limit or record.get("rootfs_limit", ""),
         "status": status or record.get("status", "unknown"),
         "created_at": created_at or record.get("created_at", datetime.now().isoformat()),
         "created_by": next_created_by,
@@ -387,6 +406,11 @@ def reconcile_containers(data):
                 ssh_port=agent_container.get("ssh_port"),
                 agent_container_id=agent_container.get("container_id", ""),
                 status=agent_container.get("status", "unknown"),
+                gpu_enabled=parse_label_bool(labels.get("manager.gpu_enabled")),
+                gpu_driver=labels.get("manager.gpu_driver", ""),
+                gpu_devices=parse_label_list(labels.get("manager.gpu_devices", "")),
+                gpu_mode=labels.get("manager.gpu_mode", ""),
+                rootfs_limit=labels.get("manager.rootfs_limit", ""),
                 created_at=agent_container.get("created_at", ""),
                 recovered=True,
             )
@@ -421,6 +445,11 @@ def adopt_agent_container(data, server_id, server, name, defaults):
             cpu_limit=defaults.get("cpu_limit", ""),
             mem_limit=defaults.get("mem_limit", ""),
             pids_limit=defaults.get("pids_limit", 512),
+            gpu_enabled=parse_label_bool(agent_container.get("labels", {}).get("manager.gpu_enabled")),
+            gpu_driver=agent_container.get("labels", {}).get("manager.gpu_driver", defaults.get("gpu_driver", "")),
+            gpu_devices=parse_label_list(agent_container.get("labels", {}).get("manager.gpu_devices", "")) or defaults.get("gpu_devices", []),
+            gpu_mode=agent_container.get("labels", {}).get("manager.gpu_mode", defaults.get("gpu_mode", "")),
+            rootfs_limit=agent_container.get("labels", {}).get("manager.rootfs_limit", defaults.get("rootfs_limit", "")),
             agent_container_id=agent_container.get("container_id", ""),
             status=agent_container.get("status", "running"),
             created_at=agent_container.get("created_at", ""),
@@ -645,11 +674,16 @@ def api_server_defaults(sid):
     if not server:
         return jsonify({"error": "服务器不存在"}), 404
     cpu, memory = default_resources(server)
+    checks = call_agent(server, "/checks", method="POST", body={"mount_roots": server.get("mount_roots", [])}, timeout=15)
     return jsonify({
         "ok": True,
         "cpu": cpu,
         "memory": memory,
-        "mount_roots": server.get("mount_roots", [])
+        "default_rootfs_limit": "120g",
+        "mount_roots": server.get("mount_roots", []),
+        "checks": checks,
+        "storage": checks.get("storage", {}),
+        "gpu": checks.get("gpu", {}),
     })
 
 @app.route("/api/servers/<sid>/gpu", methods=["GET"])
@@ -763,6 +797,11 @@ def api_containers():
                 "cpu_limit": c.get("cpu_limit", ""),
                 "mem_limit": c.get("mem_limit", ""),
                 "pids_limit": c.get("pids_limit", ""),
+                "gpu_enabled": bool(c.get("gpu_enabled", False)),
+                "gpu_driver": c.get("gpu_driver", ""),
+                "gpu_devices": c.get("gpu_devices", []),
+                "gpu_mode": c.get("gpu_mode", ""),
+                "rootfs_limit": c.get("rootfs_limit", ""),
                 "mounts": c.get("mounts", []),
                 "status": c.get("status", "running"),
                 "created_at": c.get("created_at", ""),
@@ -846,6 +885,9 @@ def api_create_container():
             return jsonify({"error": f"{SSH_PORT_MIN}-{SSH_PORT_MAX} 范围内没有可用 SSH 端口"}), 400
 
     mounts = body["mounts"] if "mounts" in body else build_default_mounts(server, assigned_to, name)
+    gpu_enabled = bool(body.get("gpu_enabled", False))
+    gpu_devices = body.get("gpu_devices", [])
+    rootfs_limit = str(body.get("rootfs_limit", "") or "").strip()
     agent_body = {
         "name": name,
         "image": body.get("image", DEFAULT_SSH_IMAGE),
@@ -853,6 +895,10 @@ def api_create_container():
         "cpu": cpu_limit,
         "memory": mem_limit,
         "pids_limit": body.get("pids_limit", 512),
+        "gpu_enabled": gpu_enabled,
+        "gpu_devices": gpu_devices,
+        "gpu_mode": body.get("gpu_mode", "shared"),
+        "rootfs_limit": rootfs_limit,
         "login_user": login_user,
         "ssh_public_key": body.get("ssh_public_key", ""),
         "password_access": bool(body.get("password_access", False)),
@@ -864,6 +910,7 @@ def api_create_container():
     }
 
     agent_result = call_agent(server, "/containers/create", method="POST", body=agent_body, timeout=330)
+    requested_gpu_devices = gpu_devices if isinstance(gpu_devices, list) else []
     defaults = {
         "assigned_to": assigned_to,
         "login_user": login_user,
@@ -872,6 +919,11 @@ def api_create_container():
         "cpu_limit": cpu_limit,
         "mem_limit": mem_limit,
         "pids_limit": agent_body["pids_limit"],
+        "gpu_enabled": gpu_enabled,
+        "gpu_driver": "nvidia" if gpu_enabled else "",
+        "gpu_devices": requested_gpu_devices,
+        "gpu_mode": agent_body["gpu_mode"] if gpu_enabled else "",
+        "rootfs_limit": rootfs_limit,
         "created_by": session["user"],
     }
     if not agent_result.get("ok"):
@@ -905,6 +957,7 @@ def api_create_container():
         final_ssh_port = ssh_port
     with data_lock:
         data = load_data()
+        resolved_gpu_devices = agent_result.get("gpu_devices", requested_gpu_devices)
         cid, record, _, _ = register_container_record(
             data,
             server_id,
@@ -918,6 +971,11 @@ def api_create_container():
             cpu_limit=cpu_limit,
             mem_limit=mem_limit,
             pids_limit=agent_body["pids_limit"],
+            gpu_enabled=gpu_enabled,
+            gpu_driver="nvidia" if gpu_enabled else "",
+            gpu_devices=resolved_gpu_devices if isinstance(resolved_gpu_devices, list) else requested_gpu_devices,
+            gpu_mode=agent_body["gpu_mode"] if gpu_enabled else "",
+            rootfs_limit=rootfs_limit,
             agent_container_id=agent_result.get("container_id", ""),
             status=agent_result.get("status", "running"),
             created_at=datetime.now().isoformat(),
