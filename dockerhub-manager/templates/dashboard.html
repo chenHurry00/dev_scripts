@@ -439,6 +439,9 @@ body {
 .btn-ok { border-color: var(--ok-dim); color: var(--ok); }
 .btn-ok:hover { background: var(--ok-dim); border-color: var(--ok); }
 
+.btn-warn { border-color: var(--warn-dim); color: var(--warn); }
+.btn-warn:hover { background: var(--warn-dim); border-color: var(--warn); }
+
 /* ═══════════════════════════════════════════════
    CONTENT PANELS (TAB SYSTEM)
 ═══════════════════════════════════════════════ */
@@ -2007,6 +2010,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
         <div class="detail-actions" id="gpu-user-detail-actions">
           <button class="btn" onclick="openGpuBaseQuotaModal(STATE.gpuAccountingActiveUser)">修改基础额度</button>
           <button class="btn btn-primary" onclick="openGpuTempQuotaModal(STATE.gpuAccountingActiveUser)">添加临时额度</button>
+          <button class="btn btn-warn" onclick="resetActiveGpuTempQuotasForUser(STATE.gpuAccountingActiveUser)">重置当前临时额度</button>
         </div>
 
         <div class="resource-section">
@@ -3456,16 +3460,25 @@ function renderGpuTempQuotaTable(detail) {
     tbody.innerHTML = '<tr><td colspan="7" class="quota-empty">当前用户还没有临时额度记录。</td></tr>';
     return;
   }
+  function renderTempQuotaStatus(item) {
+    if (item.status === 'active') {
+      return `<span class="badge badge-ok">生效中</span>`;
+    }
+    if (item.status === 'reset') {
+      return `<span class="badge badge-warn">已重置</span>`;
+    }
+    return `<span class="badge badge-gray">已结束</span>`;
+  }
   tbody.innerHTML = tempQuotas.map(item => `
     <tr>
       <td class="td-mono">+${escapeHtml(formatHours(item.extra_hours_per_week))}</td>
       <td class="td-mono">${escapeHtml(String(item.effective_weeks))} 周</td>
       <td style="font-size:11px;color:var(--text-lo)">${escapeHtml(formatDateTimeText(item.start_week).slice(0, 10))}</td>
-      <td>${item.active ? `<span class="badge badge-ok">生效中</span>` : `<span class="badge badge-gray">已结束</span>`}</td>
-      <td class="quota-table-note">${escapeHtml(item.note || '—')}</td>
+      <td>${renderTempQuotaStatus(item)}</td>
+      <td class="quota-table-note">${escapeHtml(item.note || '—')}${item.deactivated_at ? `<br>重置：${escapeHtml(item.deactivated_by || '—')} / ${escapeHtml(formatDateTimeText(item.deactivated_at))}` : ''}</td>
       <td class="quota-table-note">${escapeHtml(item.created_by || '—')} / ${escapeHtml(formatDateTimeText(item.created_at))}</td>
       <td>${STATE.role === 'admin'
-        ? `<button class="btn btn-danger" onclick="deleteGpuTempQuota('${escapeHtml(item.id)}', '${escapeHtml(detail.username)}')">删除</button>`
+        ? `${item.active ? `<button class="btn btn-warn" onclick="resetGpuTempQuota('${escapeHtml(item.id)}', '${escapeHtml(detail.username)}')">重置为 0</button>` : ''} <button class="btn btn-danger" onclick="deleteGpuTempQuota('${escapeHtml(item.id)}', '${escapeHtml(detail.username)}')">删除</button>`
         : '<span class="quota-table-note">只读</span>'}</td>
     </tr>
   `).join('');
@@ -3620,6 +3633,45 @@ async function deleteGpuTempQuota(quotaId, username) {
     loadAuditLogs();
   } else {
     toast(res.error || '临时额度删除失败', 'danger');
+  }
+}
+
+async function resetGpuTempQuota(quotaId, username) {
+  if (STATE.role !== 'admin') return;
+  if (!confirm('确认立即重置这条临时额度，使其后续有效期内不再继续生效？')) return;
+  const res = await api(`/api/gpu-accounting/temp-quotas/${encodeURIComponent(quotaId)}/reset`, {
+    method: 'POST'
+  });
+  if (res.ok) {
+    toast('临时额度已重置为 0', 'warn');
+    await loadGpuAccountingSummary(true);
+    if (username) {
+      await openGpuUserDetail(username);
+    }
+    loadAuditLogs();
+  } else {
+    toast(res.error || '临时额度重置失败', 'danger');
+  }
+}
+
+async function resetActiveGpuTempQuotasForUser(username) {
+  if (STATE.role !== 'admin') return;
+  const normalizedUsername = String(username || '').trim();
+  if (!normalizedUsername) {
+    toast('缺少业务用户标识', 'warn');
+    return;
+  }
+  if (!confirm(`确认将 ${normalizedUsername} 当前生效中的临时额度全部重置为 0？`)) return;
+  const res = await api(`/api/gpu-accounting/users/${encodeURIComponent(normalizedUsername)}/temp-quotas/reset`, {
+    method: 'POST'
+  });
+  if (res.ok) {
+    toast(`已重置 ${res.reset_count || 0} 条临时额度`, 'warn');
+    await loadGpuAccountingSummary(true);
+    await openGpuUserDetail(normalizedUsername);
+    loadAuditLogs();
+  } else {
+    toast(res.error || '临时额度批量重置失败', 'danger');
   }
 }
 

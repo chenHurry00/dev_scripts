@@ -139,6 +139,8 @@ def ensure_gpu_accounting_defaults(data):
             "created_at": str(record.get("created_at") or "").strip(),
             "created_by": str(record.get("created_by") or "").strip(),
             "note": str(record.get("note") or "").strip(),
+            "deactivated_at": str(record.get("deactivated_at") or "").strip(),
+            "deactivated_by": str(record.get("deactivated_by") or "").strip(),
         })
     cfg["temp_quotas"] = normalized_temp_quotas
     return cfg
@@ -350,14 +352,22 @@ def iter_gpu_temp_quotas(data, username=""):
 def build_gpu_temp_quota_view(record, week_start):
     start_week = normalize_week_start(record.get("start_week") or record.get("created_at"))
     effective_weeks = clamp_int(record.get("effective_weeks"), 1, minimum=1, maximum=52)
+    deactivated_at = str(record.get("deactivated_at") or "").strip()
+    deactivated_by = str(record.get("deactivated_by") or "").strip()
     active = False
     weeks_remaining = 0
     end_week = None
+    status = "ended"
     if start_week is not None:
         end_week = start_week + timedelta(days=7 * effective_weeks)
-        active = start_week <= week_start < end_week
+        active = (not deactivated_at) and start_week <= week_start < end_week
         if active:
+            status = "active"
             weeks_remaining = max(0, int((end_week - week_start).days // 7))
+        elif deactivated_at:
+            status = "reset"
+    elif deactivated_at:
+        status = "reset"
     return {
         "id": str(record.get("id") or "").strip(),
         "username": str(record.get("username") or "").strip(),
@@ -369,7 +379,10 @@ def build_gpu_temp_quota_view(record, week_start):
         "created_by": str(record.get("created_by") or "").strip(),
         "note": str(record.get("note") or "").strip(),
         "active": active,
+        "status": status,
         "weeks_remaining": weeks_remaining,
+        "deactivated_at": deactivated_at,
+        "deactivated_by": deactivated_by,
     }
 
 def current_gpu_temp_quota_hours(data, username, week_start):
@@ -2112,6 +2125,65 @@ def api_gpu_accounting_delete_temp_quota(quota_id):
         )
         save_data(data)
     return jsonify({"ok": True, "username": str(removed.get("username") or "").strip()})
+
+@app.route("/api/gpu-accounting/temp-quotas/<quota_id>/reset", methods=["POST"])
+@login_required
+@role_required("admin")
+def api_gpu_accounting_reset_temp_quota(quota_id):
+    quota_id = str(quota_id or "").strip()
+    if not quota_id:
+        return jsonify({"error": "缺少临时额度标识"}), 400
+    week_start, _ = current_week_window()
+    with data_lock:
+        data = load_data()
+        cfg = ensure_gpu_accounting_defaults(data)
+        target = None
+        for record in cfg.setdefault("temp_quotas", []):
+            if str(record.get("id") or "").strip() != quota_id:
+                continue
+            target = record
+            break
+        if target is None:
+            return jsonify({"error": "临时额度记录不存在"}), 404
+        view = build_gpu_temp_quota_view(target, week_start)
+        if not view.get("active"):
+            return jsonify({"error": "当前临时额度未处于生效状态，无需重置"}), 400
+        target["deactivated_at"] = datetime.now().isoformat(timespec="seconds")
+        target["deactivated_by"] = session["user"]
+        append_audit(
+            data,
+            f"重置 GPU 临时额度 {target.get('username', '')} +{target.get('extra_hours_per_week', 0)}h/周"
+        )
+        save_data(data)
+        view = build_gpu_temp_quota_view(target, week_start)
+    return jsonify({"ok": True, "record": view, "username": str(target.get("username") or "").strip()})
+
+@app.route("/api/gpu-accounting/users/<path:username>/temp-quotas/reset", methods=["POST"])
+@login_required
+@role_required("admin")
+def api_gpu_accounting_reset_user_temp_quotas(username):
+    username = str(username or "").strip()
+    if not username:
+        return jsonify({"error": "缺少用户标识"}), 400
+    week_start, _ = current_week_window()
+    reset_count = 0
+    with data_lock:
+        data = load_data()
+        cfg = ensure_gpu_accounting_defaults(data)
+        for record in cfg.setdefault("temp_quotas", []):
+            if str(record.get("username") or "").strip() != username:
+                continue
+            view = build_gpu_temp_quota_view(record, week_start)
+            if not view.get("active"):
+                continue
+            record["deactivated_at"] = datetime.now().isoformat(timespec="seconds")
+            record["deactivated_by"] = session["user"]
+            reset_count += 1
+        if reset_count <= 0:
+            return jsonify({"error": "当前用户没有生效中的临时额度，无需重置"}), 400
+        append_audit(data, f"重置用户 GPU 临时额度 {username}，共 {reset_count} 条")
+        save_data(data)
+    return jsonify({"ok": True, "username": username, "reset_count": reset_count})
 
 @app.route("/api/containers", methods=["POST"])
 @login_required
