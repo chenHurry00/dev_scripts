@@ -693,6 +693,11 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   animation: slideUp 0.2s ease;
 }
 
+.modal-wide {
+  width: 980px;
+  max-width: 96vw;
+}
+
 @keyframes slideUp {
   from { opacity: 0; transform: translateY(16px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -914,6 +919,107 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 12px;
+}
+
+.gpu-summary-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-lo);
+}
+
+.gpu-summary-bar strong {
+  color: var(--text-mid);
+  font-weight: 600;
+}
+
+.detail-toggle {
+  display: inline-flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.detail-toggle .btn {
+  padding: 7px 12px;
+  text-transform: none;
+  letter-spacing: 0.04em;
+}
+
+.detail-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.table-cell-stack {
+  display: grid;
+  gap: 4px;
+}
+
+.table-cell-main {
+  color: var(--text-hi);
+  font-size: 13px;
+}
+
+.table-cell-sub {
+  color: var(--text-lo);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.detail-inline-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.detail-inline-card {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.detail-inline-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-lo);
+  text-transform: uppercase;
+}
+
+.detail-inline-value {
+  margin-top: 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-hi);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-table-note {
+  color: var(--text-lo);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.quota-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quota-empty {
+  padding: 14px 0;
+  color: var(--text-lo);
+  font-size: 12px;
 }
 
 .modal-inline-actions {
@@ -1174,6 +1280,10 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   .resource-preview-grid {
     grid-template-columns: 1fr;
   }
+
+  .detail-inline-summary {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 </style>
 </head>
@@ -1243,6 +1353,11 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
       <div class="nav-item" onclick="switchPanel('images')">
         <span class="nav-icon">◧</span>
         <span>镜像库</span>
+      </div>
+      <div class="nav-item" onclick="switchPanel('gpu-accounting')">
+        <span class="nav-icon">◫</span>
+        <span>GPU用量</span>
+        <span class="nav-badge" id="badge-gpu">0</span>
       </div>
     </div>
 
@@ -1493,6 +1608,98 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
               <tr><th>镜像</th><th>类型</th><th>来源容器</th><th>镜像 ID</th><th>创建时间</th><th>大小</th><th>操作</th></tr>
             </thead>
             <tbody id="img-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── GPU ACCOUNTING PANEL ── -->
+    <div id="panel-gpu-accounting" class="panel">
+      <div class="page-header">
+        <div class="page-title-group">
+          <div class="page-breadcrumb">DockerHub / <span>GPU计算时</span></div>
+          <div class="page-title">GPU计算时</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn" onclick="loadGpuAccountingSummary()">刷新</button>
+        </div>
+      </div>
+      <div class="content-area">
+        <div class="stat-grid">
+          <div class="stat-card c-purple">
+            <div class="stat-label">本周总 GPU卡时</div>
+            <div class="stat-value" id="gpu-ov-weekly">—</div>
+            <div class="stat-sub">按业务用户汇总</div>
+            <div class="stat-icon">◫</div>
+          </div>
+          <div class="stat-card c-warn">
+            <div class="stat-label">本周超额用户</div>
+            <div class="stat-value" id="gpu-ov-over">—</div>
+            <div class="stat-sub">使用率已达 100%</div>
+            <div class="stat-icon">⚠</div>
+          </div>
+          <div class="stat-card c-info">
+            <div class="stat-label">当前活跃用户</div>
+            <div class="stat-value" id="gpu-ov-active-users">—</div>
+            <div class="stat-sub">正在占用 GPU</div>
+            <div class="stat-icon">◉</div>
+          </div>
+          <div class="stat-card c-ok">
+            <div class="stat-label">当前低效占用用户</div>
+            <div class="stat-value" id="gpu-ov-low-users">—</div>
+            <div class="stat-sub">低 GPU% 但显存仍达阈值</div>
+            <div class="stat-icon">△</div>
+          </div>
+        </div>
+
+        <div class="table-wrap" style="margin-bottom:18px">
+          <div class="table-header">
+            <div class="table-title">统计设置</div>
+            <div class="gpu-summary-bar" id="gpu-summary-bar">
+              <span><strong>采样周期</strong> <span id="gpu-sampling-interval">—</span></span>
+              <span><strong>最近采样</strong> <span id="gpu-last-sample">—</span></span>
+              <span><strong>最近成功</strong> <span id="gpu-last-success">—</span></span>
+            </div>
+          </div>
+          <div style="padding:16px">
+            <div class="form-row">
+              <div class="form-field">
+                <label class="form-label">默认基础额度（GPU卡时 / 周）</label>
+                <input class="form-input" type="number" id="gpu-default-weekly-quota" min="1" max="100000">
+              </div>
+              <div class="form-field">
+                <label class="form-label">统计保留天数</label>
+                <input class="form-input" type="number" id="gpu-retention-days" min="7" max="365">
+              </div>
+            </div>
+            <div class="form-hint" id="gpu-settings-hint">默认基础额度用于未单独配置的业务用户；保留天数只影响 GPU 计算时统计分钟桶，不影响审计日志。</div>
+            <div class="form-hint" id="gpu-server-error-hint" style="margin-top:8px">暂无服务器采样错误。</div>
+            <div class="modal-inline-actions" id="gpu-settings-actions">
+              <button class="btn btn-primary" onclick="saveGpuAccountingSettings()">保存设置</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <div class="table-header">
+            <div class="table-title">用户 GPU 计算时总表</div>
+            <input class="table-search" type="text" placeholder="搜索业务用户…" oninput="filterTable(this,'gpu-accounting-table-body')">
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>本周已用 / 有效额度</th>
+                <th>基础 / 临时额度</th>
+                <th>使用率</th>
+                <th>超额量</th>
+                <th>当前活跃 GPU</th>
+                <th>当前低效占用</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="gpu-accounting-table-body"></tbody>
           </table>
         </div>
       </div>
@@ -1765,6 +1972,175 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   </div>
 </div>
 
+<!-- ═══════ MODAL: GPU 计算时详情 ═══════ -->
+<div class="modal-overlay" id="modal-gpu-user-detail">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <div class="modal-title" id="gpu-user-detail-title">GPU 计算时详情</div>
+      <button class="modal-close" onclick="closeModal('modal-gpu-user-detail')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="detail-stack">
+        <div class="resource-card">
+          <div class="resource-card-title" id="gpu-user-detail-name">—</div>
+          <div class="resource-card-meta" id="gpu-user-detail-meta">—</div>
+          <div class="detail-inline-summary">
+            <div class="detail-inline-card">
+              <div class="detail-inline-label">本周已用</div>
+              <div class="detail-inline-value" id="gpu-user-detail-used">—</div>
+            </div>
+            <div class="detail-inline-card">
+              <div class="detail-inline-label">有效额度</div>
+              <div class="detail-inline-value" id="gpu-user-detail-effective">—</div>
+            </div>
+            <div class="detail-inline-card">
+              <div class="detail-inline-label">当前活跃 GPU</div>
+              <div class="detail-inline-value" id="gpu-user-detail-active">—</div>
+            </div>
+            <div class="detail-inline-card">
+              <div class="detail-inline-label">低效占用 GPU</div>
+              <div class="detail-inline-value" id="gpu-user-detail-low">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="detail-actions" id="gpu-user-detail-actions">
+          <button class="btn" onclick="openGpuBaseQuotaModal(STATE.gpuAccountingActiveUser)">修改基础额度</button>
+          <button class="btn btn-primary" onclick="openGpuTempQuotaModal(STATE.gpuAccountingActiveUser)">添加临时额度</button>
+        </div>
+
+        <div class="resource-section">
+          <div class="resource-section-head">
+            <div>
+              <div class="resource-section-title">统计明细</div>
+              <div class="resource-section-sub">支持按服务器查看，也支持按同名容器跨服务器汇总查看。</div>
+            </div>
+          </div>
+          <div class="detail-toggle">
+            <button class="btn btn-primary" id="gpu-detail-tab-servers" onclick="switchGpuDetailView('servers')">按服务器</button>
+            <button class="btn" id="gpu-detail-tab-containers" onclick="switchGpuDetailView('containers')">按容器名</button>
+          </div>
+          <div id="gpu-detail-view-servers">
+            <table>
+              <thead>
+                <tr>
+                  <th>服务器 / 容器</th>
+                  <th>本周 GPU卡时</th>
+                  <th>本周低效占用</th>
+                  <th>平均 GPU%</th>
+                  <th>当前活跃 GPU</th>
+                  <th>当前设备</th>
+                </tr>
+              </thead>
+              <tbody id="gpu-detail-servers-body"></tbody>
+            </table>
+          </div>
+          <div id="gpu-detail-view-containers" style="display:none">
+            <table>
+              <thead>
+                <tr>
+                  <th>容器名 / 服务器</th>
+                  <th>本周 GPU卡时</th>
+                  <th>本周低效占用</th>
+                  <th>平均 GPU%</th>
+                  <th>当前活跃 GPU</th>
+                  <th>当前设备</th>
+                </tr>
+              </thead>
+              <tbody id="gpu-detail-containers-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="resource-section">
+          <div class="resource-section-head">
+            <div>
+              <div class="resource-section-title">临时额度记录</div>
+              <div class="resource-section-sub">按当前面板时区自然周生效。到期后不再增加每周额度。</div>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>追加额度</th>
+                <th>生效周数</th>
+                <th>起始周</th>
+                <th>状态</th>
+                <th>备注</th>
+                <th>创建信息</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="gpu-detail-temp-quota-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-gpu-user-detail')">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ MODAL: GPU 基础额度 ═══════ -->
+<div class="modal-overlay" id="modal-gpu-base-quota">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title" id="gpu-base-quota-title">修改基础额度</div>
+      <button class="modal-close" onclick="closeModal('modal-gpu-base-quota')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label class="form-label">业务用户</label>
+        <input class="form-input" id="gpu-base-quota-username" readonly>
+      </div>
+      <div class="form-field">
+        <label class="form-label">基础额度覆盖（GPU卡时 / 周）</label>
+        <input class="form-input" type="number" id="gpu-base-quota-hours" min="0" max="100000" placeholder="留空或 0 表示恢复默认">
+        <div class="form-hint" id="gpu-base-quota-hint">留空或填 0 表示清除单独覆盖，恢复继承全局默认基础额度。</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-gpu-base-quota')">取消</button>
+      <button class="btn btn-primary" id="gpu-base-quota-submit" onclick="saveGpuBaseQuota()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ MODAL: GPU 临时额度 ═══════ -->
+<div class="modal-overlay" id="modal-gpu-temp-quota">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title" id="gpu-temp-quota-title">添加临时额度</div>
+      <button class="modal-close" onclick="closeModal('modal-gpu-temp-quota')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label class="form-label">业务用户</label>
+        <input class="form-input" id="gpu-temp-quota-username" readonly>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">追加额度（GPU卡时 / 周）</label>
+          <input class="form-input" type="number" id="gpu-temp-extra-hours" min="1" max="100000" value="48">
+        </div>
+        <div class="form-field">
+          <label class="form-label">生效周数</label>
+          <input class="form-input" type="number" id="gpu-temp-effective-weeks" min="1" max="52" value="1">
+        </div>
+      </div>
+      <div class="form-field">
+        <label class="form-label">备注</label>
+        <textarea class="form-textarea" id="gpu-temp-note" placeholder="例如：阶段性训练任务"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-gpu-temp-quota')">取消</button>
+      <button class="btn btn-primary" id="gpu-temp-quota-submit" onclick="saveGpuTempQuota()">添加</button>
+    </div>
+  </div>
+</div>
+
 <!-- ═══════ MODAL: 导入配置 ═══════ -->
 <div class="modal-overlay" id="modal-import-config">
   <div class="modal">
@@ -1962,11 +2338,16 @@ const STATE = {
   containerMetrics: {},
   containerMetricsErrors: {},
   users: [],
+  gpuAccountingSummary: null,
+  gpuAccountingDetail: null,
+  gpuAccountingActiveUser: '',
+  gpuAccountingDetailView: 'servers',
   containerImages: {},
   imageCatalogs: {},
   editingServerId: null,
   editingContainerId: null,
   containerMetricsTimer: null,
+  gpuAccountingTimer: null,
   imageTaskTimer: null,
   finishedImageTasks: {}
 };
@@ -1999,6 +2380,14 @@ updateClock();
   if (STATE.role !== 'admin') {
     const s = document.getElementById('admin-section');
     if (s) s.style.display = 'none';
+    const gpuActions = document.getElementById('gpu-settings-actions');
+    if (gpuActions) gpuActions.style.display = 'none';
+    const gpuDetailActions = document.getElementById('gpu-user-detail-actions');
+    if (gpuDetailActions) gpuDetailActions.style.display = 'none';
+    const quotaInput = document.getElementById('gpu-default-weekly-quota');
+    const retentionInput = document.getElementById('gpu-retention-days');
+    if (quotaInput) quotaInput.disabled = true;
+    if (retentionInput) retentionInput.disabled = true;
   }
 })();
 
@@ -2014,6 +2403,7 @@ function switchPanel(name) {
   if (name === 'containers') loadContainers();
   if (name === 'servers')    loadServers();
   if (name === 'images')     loadImagesPanel();
+  if (name === 'gpu-accounting') loadGpuAccountingSummary();
   if (name === 'users')      loadUsers();
   if (name === 'audit')      loadAuditLogs();
 }
@@ -2045,6 +2435,19 @@ function closeModal(id) {
     document.getElementById('edit-ctr-backup-submit').textContent = '备份为镜像';
     document.getElementById('edit-ctr-rebuild-submit').disabled = false;
     document.getElementById('edit-ctr-rebuild-submit').textContent = '重建并应用变更';
+  }
+  if (id === 'modal-gpu-user-detail') {
+    STATE.gpuAccountingActiveUser = '';
+    STATE.gpuAccountingDetail = null;
+    STATE.gpuAccountingDetailView = 'servers';
+  }
+  if (id === 'modal-gpu-base-quota') {
+    document.getElementById('gpu-base-quota-submit').disabled = false;
+    document.getElementById('gpu-base-quota-submit').textContent = '保存';
+  }
+  if (id === 'modal-gpu-temp-quota') {
+    document.getElementById('gpu-temp-quota-submit').disabled = false;
+    document.getElementById('gpu-temp-quota-submit').textContent = '添加';
   }
 }
 document.querySelectorAll('.modal-overlay').forEach(el => {
@@ -2793,6 +3196,431 @@ function statusBadge(s) {
 function roleBadge(r) {
   const map = { admin: 'badge-purple', allocator: 'badge-info' };
   return `<span class="badge ${map[r] || 'badge-gray'}">${r}</span>`;
+}
+
+function formatHours(value, withUnit = true) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '—';
+  const digits = num >= 100 ? 0 : (num >= 10 ? 1 : 2);
+  return `${num.toFixed(digits)}${withUnit ? ' h' : ''}`;
+}
+
+function formatDateTimeText(value) {
+  const text = String(value || '').trim();
+  if (!text) return '—';
+  return text.slice(0, 19).replace('T', ' ');
+}
+
+function gpuQuotaStatusBadge(status) {
+  const map = {
+    normal: ['badge-ok', '正常'],
+    warn: ['badge-warn', '预警'],
+    over: ['badge-danger', '超额'],
+    critical: ['badge-danger', '严重超额']
+  };
+  const [klass, label] = map[status] || ['badge-gray', status || '未知'];
+  return `<span class="badge ${klass}">${label}</span>`;
+}
+
+function findGpuAccountingUser(username) {
+  const users = (STATE.gpuAccountingSummary && STATE.gpuAccountingSummary.users) || [];
+  return users.find(item => item.username === username) || null;
+}
+
+function renderGpuServerErrorSummary(errors) {
+  const entries = Object.entries(errors || {});
+  if (!entries.length) {
+    return '暂无服务器采样错误。';
+  }
+  return `采样异常 ${entries.length} 台：` + entries
+    .map(([serverId, message]) => `${serverId} (${message || 'unknown error'})`)
+    .join('；');
+}
+
+function renderGpuAccountingTable() {
+  const tbody = document.getElementById('gpu-accounting-table-body');
+  const summary = STATE.gpuAccountingSummary || {};
+  const users = summary.users || [];
+  document.getElementById('badge-gpu').textContent = String((summary.stats && summary.stats.over_quota_user_count) || 0);
+  if (!users.length) {
+    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">
+      <div class="empty-icon">◫</div>
+      <div class="empty-title">暂无 GPU 计算时记录</div>
+      <div class="empty-sub">等待后台采样累计后会在这里展示业务用户总表</div>
+    </div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = users.map(user => {
+    const usagePercent = Number(user.usage_ratio || 0) * 100;
+    const adminActions = STATE.role === 'admin'
+      ? `
+        <button class="btn" onclick="openGpuBaseQuotaModal('${escapeHtml(user.username)}')">基础额度</button>
+        <button class="btn" onclick="openGpuTempQuotaModal('${escapeHtml(user.username)}')">临时额度</button>
+      `
+      : '';
+    return `
+      <tr>
+        <td class="td-hi">${escapeHtml(user.username)}</td>
+        <td>
+          <div class="table-cell-stack">
+            <div class="table-cell-main">${escapeHtml(formatHours(user.weekly_gpu_card_hours))} / ${escapeHtml(formatHours(user.effective_quota_hours))}</div>
+            <div class="table-cell-sub">低效占用 ${escapeHtml(formatHours(user.weekly_low_efficiency_card_hours))}</div>
+          </div>
+        </td>
+        <td>
+          <div class="table-cell-stack">
+            <div class="table-cell-main">${escapeHtml(formatHours(user.base_quota_hours))}</div>
+            <div class="table-cell-sub">临时 +${escapeHtml(formatHours(user.temporary_extra_quota_hours))}</div>
+          </div>
+        </td>
+        <td class="td-mono">${escapeHtml(formatPercent(usagePercent))}</td>
+        <td class="td-mono">${escapeHtml(formatHours(user.over_quota_hours))}</td>
+        <td class="td-mono">${escapeHtml(String(user.current_active_gpu_count || 0))}</td>
+        <td class="td-mono">${escapeHtml(String(user.current_low_efficiency_gpu_count || 0))}</td>
+        <td>${gpuQuotaStatusBadge(user.quota_status)}</td>
+        <td>
+          <button class="btn btn-primary" onclick="openGpuUserDetail('${escapeHtml(user.username)}')">明细</button>
+          ${adminActions}
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function applyGpuAccountingSummary(summary) {
+  STATE.gpuAccountingSummary = summary || { users: [], stats: {} };
+  const stats = STATE.gpuAccountingSummary.stats || {};
+  document.getElementById('gpu-ov-weekly').textContent = formatHours(stats.weekly_total_gpu_card_hours || 0, false);
+  document.getElementById('gpu-ov-over').textContent = String(stats.over_quota_user_count || 0);
+  document.getElementById('gpu-ov-active-users').textContent = String(stats.current_active_user_count || 0);
+  document.getElementById('gpu-ov-low-users').textContent = String(stats.current_low_efficiency_user_count || 0);
+  document.getElementById('gpu-default-weekly-quota').value = STATE.gpuAccountingSummary.default_weekly_quota_hours || 72;
+  document.getElementById('gpu-retention-days').value = STATE.gpuAccountingSummary.retention_days || 30;
+  document.getElementById('gpu-sampling-interval').textContent = `${STATE.gpuAccountingSummary.sampling_interval_seconds || 10}s`;
+  document.getElementById('gpu-last-sample').textContent = formatDateTimeText(STATE.gpuAccountingSummary.last_sample_at);
+  document.getElementById('gpu-last-success').textContent = formatDateTimeText(STATE.gpuAccountingSummary.last_success_at);
+  document.getElementById('gpu-server-error-hint').textContent = renderGpuServerErrorSummary(STATE.gpuAccountingSummary.server_errors || {});
+  renderGpuAccountingTable();
+}
+
+async function loadGpuAccountingSummary(silent = false) {
+  const data = await api('/api/gpu-accounting/summary');
+  if (!data.ok) {
+    if (!silent) toast(data.error || 'GPU 计算时汇总读取失败', 'danger');
+    return;
+  }
+  applyGpuAccountingSummary(data);
+  ensureGpuAccountingTimer();
+}
+
+function ensureGpuAccountingTimer() {
+  if (STATE.gpuAccountingTimer) return;
+  STATE.gpuAccountingTimer = setInterval(() => {
+    if (document.getElementById('panel-gpu-accounting').classList.contains('active')) {
+      loadGpuAccountingSummary(true);
+    }
+  }, 10000);
+}
+
+async function saveGpuAccountingSettings() {
+  if (STATE.role !== 'admin') return;
+  const quota = parseInt(document.getElementById('gpu-default-weekly-quota').value, 10);
+  const retention = parseInt(document.getElementById('gpu-retention-days').value, 10);
+  if (Number.isNaN(quota) || quota <= 0) {
+    toast('默认基础额度必须是大于 0 的整数', 'warn');
+    return;
+  }
+  if (Number.isNaN(retention) || retention < 7 || retention > 365) {
+    toast('统计保留天数必须位于 7 到 365 之间', 'warn');
+    return;
+  }
+  const res = await api('/api/gpu-accounting/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({
+      default_weekly_quota_hours: quota,
+      retention_days: retention
+    })
+  });
+  if (res.ok) {
+    toast('GPU 计算时设置已保存', 'ok');
+    await loadGpuAccountingSummary(true);
+    loadAuditLogs();
+  } else {
+    toast(res.error || 'GPU 计算时设置保存失败', 'danger');
+  }
+}
+
+function switchGpuDetailView(view) {
+  STATE.gpuAccountingDetailView = view;
+  const serversVisible = view === 'servers';
+  document.getElementById('gpu-detail-view-servers').style.display = serversVisible ? '' : 'none';
+  document.getElementById('gpu-detail-view-containers').style.display = serversVisible ? 'none' : '';
+  document.getElementById('gpu-detail-tab-servers').classList.toggle('btn-primary', serversVisible);
+  document.getElementById('gpu-detail-tab-containers').classList.toggle('btn-primary', !serversVisible);
+}
+
+function renderGpuDetailServers(detail) {
+  const tbody = document.getElementById('gpu-detail-servers-body');
+  const servers = detail.servers || [];
+  if (!servers.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="quota-empty">当前用户本周暂无服务器级 GPU 计算时记录。</td></tr>';
+    return;
+  }
+  const rows = [];
+  servers.forEach(server => {
+    rows.push(`
+      <tr>
+        <td class="td-hi">
+          <div class="table-cell-stack">
+            <div class="table-cell-main">${escapeHtml(server.server_name || server.server_id || '未知服务器')}</div>
+            <div class="table-cell-sub">峰值活跃 ${escapeHtml(String(server.weekly_peak_active_gpu_count || 0))} / 当前容器 ${escapeHtml(String((server.containers || []).length))}</div>
+          </div>
+        </td>
+        <td class="td-mono">${escapeHtml(formatHours(server.weekly_gpu_card_hours))}</td>
+        <td class="td-mono">${escapeHtml(formatHours(server.weekly_low_efficiency_card_hours))}</td>
+        <td class="td-mono">${escapeHtml(formatPercent(server.weekly_avg_gpu_util_percent || 0))}</td>
+        <td class="td-mono">${escapeHtml(String(server.current_active_gpu_count || 0))}</td>
+        <td class="td-mono">${escapeHtml((server.containers || []).flatMap(item => item.current_gpu_devices || []).join(', ') || '—')}</td>
+      </tr>
+    `);
+    (server.containers || []).forEach(container => {
+      rows.push(`
+        <tr>
+          <td>
+            <div class="table-cell-stack">
+              <div class="table-cell-main">↳ ${escapeHtml(container.container_name || '未命名容器')}</div>
+              <div class="table-cell-sub">登录用户 ${escapeHtml(container.login_user || '—')}</div>
+            </div>
+          </td>
+          <td class="td-mono">${escapeHtml(formatHours(container.weekly_gpu_card_hours))}</td>
+          <td class="td-mono">${escapeHtml(formatHours(container.weekly_low_efficiency_card_hours))}</td>
+          <td class="td-mono">${escapeHtml(formatPercent(container.weekly_avg_gpu_util_percent || 0))}</td>
+          <td class="td-mono">${escapeHtml(String(container.current_active_gpu_count || 0))}</td>
+          <td class="td-mono">${escapeHtml((container.current_gpu_devices || []).join(', ') || '—')}</td>
+        </tr>
+      `);
+    });
+  });
+  tbody.innerHTML = rows.join('');
+}
+
+function renderGpuDetailContainers(detail) {
+  const tbody = document.getElementById('gpu-detail-containers-body');
+  const containers = detail.containers_by_name || [];
+  if (!containers.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="quota-empty">当前用户本周暂无同名容器汇总记录。</td></tr>';
+    return;
+  }
+  const rows = [];
+  containers.forEach(container => {
+    rows.push(`
+      <tr>
+        <td class="td-hi">
+          <div class="table-cell-stack">
+            <div class="table-cell-main">${escapeHtml(container.container_name || '未命名容器')}</div>
+            <div class="table-cell-sub">跨服务器汇总</div>
+          </div>
+        </td>
+        <td class="td-mono">${escapeHtml(formatHours(container.weekly_gpu_card_hours))}</td>
+        <td class="td-mono">${escapeHtml(formatHours(container.weekly_low_efficiency_card_hours))}</td>
+        <td class="td-mono">${escapeHtml(formatPercent(container.weekly_avg_gpu_util_percent || 0))}</td>
+        <td class="td-mono">${escapeHtml(String(container.current_active_gpu_count || 0))}</td>
+        <td class="td-mono">${escapeHtml((container.servers || []).flatMap(item => item.current_gpu_devices || []).join(', ') || '—')}</td>
+      </tr>
+    `);
+    (container.servers || []).forEach(server => {
+      rows.push(`
+        <tr>
+          <td>
+            <div class="table-cell-stack">
+              <div class="table-cell-main">↳ ${escapeHtml(server.server_name || server.server_id || '未知服务器')}</div>
+              <div class="table-cell-sub">当前活跃 ${escapeHtml(String(server.current_active_gpu_count || 0))} 张 GPU</div>
+            </div>
+          </td>
+          <td class="td-mono">${escapeHtml(formatHours(server.weekly_gpu_card_hours))}</td>
+          <td class="td-mono">${escapeHtml(formatHours(server.weekly_low_efficiency_card_hours))}</td>
+          <td class="td-mono">—</td>
+          <td class="td-mono">${escapeHtml(String(server.current_active_gpu_count || 0))}</td>
+          <td class="td-mono">${escapeHtml((server.current_gpu_devices || []).join(', ') || '—')}</td>
+        </tr>
+      `);
+    });
+  });
+  tbody.innerHTML = rows.join('');
+}
+
+function renderGpuTempQuotaTable(detail) {
+  const tbody = document.getElementById('gpu-detail-temp-quota-body');
+  const tempQuotas = detail.temp_quotas || [];
+  if (!tempQuotas.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="quota-empty">当前用户还没有临时额度记录。</td></tr>';
+    return;
+  }
+  tbody.innerHTML = tempQuotas.map(item => `
+    <tr>
+      <td class="td-mono">+${escapeHtml(formatHours(item.extra_hours_per_week))}</td>
+      <td class="td-mono">${escapeHtml(String(item.effective_weeks))} 周</td>
+      <td style="font-size:11px;color:var(--text-lo)">${escapeHtml(formatDateTimeText(item.start_week).slice(0, 10))}</td>
+      <td>${item.active ? `<span class="badge badge-ok">生效中</span>` : `<span class="badge badge-gray">已结束</span>`}</td>
+      <td class="quota-table-note">${escapeHtml(item.note || '—')}</td>
+      <td class="quota-table-note">${escapeHtml(item.created_by || '—')} / ${escapeHtml(formatDateTimeText(item.created_at))}</td>
+      <td>${STATE.role === 'admin'
+        ? `<button class="btn btn-danger" onclick="deleteGpuTempQuota('${escapeHtml(item.id)}', '${escapeHtml(detail.username)}')">删除</button>`
+        : '<span class="quota-table-note">只读</span>'}</td>
+    </tr>
+  `).join('');
+}
+
+function applyGpuUserDetail(detail) {
+  STATE.gpuAccountingDetail = detail;
+  document.getElementById('gpu-user-detail-title').textContent = `GPU 计算时详情 · ${detail.username}`;
+  document.getElementById('gpu-user-detail-name').textContent = detail.username || '—';
+  document.getElementById('gpu-user-detail-meta').textContent =
+    `基础额度 ${formatHours(detail.base_quota_hours)} / 临时追加 +${formatHours(detail.temporary_extra_quota_hours)} / 状态 ${detail.quota_status || 'normal'} / 最近采样 ${formatDateTimeText(detail.last_sample_at)}`;
+  document.getElementById('gpu-user-detail-used').textContent = formatHours(detail.weekly_gpu_card_hours || 0, false);
+  document.getElementById('gpu-user-detail-effective').textContent = formatHours(detail.effective_quota_hours || 0, false);
+  document.getElementById('gpu-user-detail-active').textContent = String(detail.current_active_gpu_count || 0);
+  document.getElementById('gpu-user-detail-low').textContent = String(detail.current_low_efficiency_gpu_count || 0);
+  renderGpuDetailServers(detail);
+  renderGpuDetailContainers(detail);
+  renderGpuTempQuotaTable(detail);
+  switchGpuDetailView(STATE.gpuAccountingDetailView || 'servers');
+}
+
+async function openGpuUserDetail(username) {
+  const normalizedUsername = String(username || '').trim();
+  if (!normalizedUsername) {
+    toast('缺少业务用户标识', 'warn');
+    return;
+  }
+  const data = await api(`/api/gpu-accounting/users/${encodeURIComponent(normalizedUsername)}`);
+  if (!data.ok) {
+    toast(data.error || 'GPU 计算时详情读取失败', 'danger');
+    return;
+  }
+  STATE.gpuAccountingActiveUser = normalizedUsername;
+  STATE.gpuAccountingDetailView = 'servers';
+  applyGpuUserDetail(data);
+  openModal('modal-gpu-user-detail');
+}
+
+function openGpuBaseQuotaModal(username) {
+  if (STATE.role !== 'admin') return;
+  const normalizedUsername = String(username || STATE.gpuAccountingActiveUser || '').trim();
+  if (!normalizedUsername) {
+    toast('缺少业务用户标识', 'warn');
+    return;
+  }
+  const summaryUser = findGpuAccountingUser(normalizedUsername);
+  document.getElementById('gpu-base-quota-title').textContent = `修改基础额度 · ${normalizedUsername}`;
+  document.getElementById('gpu-base-quota-username').value = normalizedUsername;
+  document.getElementById('gpu-base-quota-hours').value =
+    summaryUser && summaryUser.user_base_quota_hours ? summaryUser.user_base_quota_hours : '';
+  document.getElementById('gpu-base-quota-hint').textContent =
+    `当前生效基础额度 ${formatHours(summaryUser ? summaryUser.base_quota_hours : 0)}，留空或 0 恢复继承默认额度。`;
+  openModal('modal-gpu-base-quota');
+}
+
+async function saveGpuBaseQuota() {
+  const username = document.getElementById('gpu-base-quota-username').value.trim();
+  const rawValue = document.getElementById('gpu-base-quota-hours').value.trim();
+  const value = rawValue ? parseInt(rawValue, 10) : 0;
+  if (rawValue && (Number.isNaN(value) || value < 0)) {
+    toast('基础额度必须是非负整数', 'warn');
+    return;
+  }
+  const submitBtn = document.getElementById('gpu-base-quota-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '保存中...';
+  const res = await api(`/api/gpu-accounting/users/${encodeURIComponent(username)}/base-quota`, {
+    method: 'PATCH',
+    body: JSON.stringify({ base_quota_hours: value || 0 })
+  });
+  submitBtn.disabled = false;
+  submitBtn.textContent = '保存';
+  if (res.ok) {
+    closeModal('modal-gpu-base-quota');
+    toast('基础额度已更新', 'ok');
+    await loadGpuAccountingSummary(true);
+    if (STATE.gpuAccountingActiveUser === username) {
+      await openGpuUserDetail(username);
+    }
+    loadAuditLogs();
+  } else {
+    toast(res.error || '基础额度更新失败', 'danger');
+  }
+}
+
+function openGpuTempQuotaModal(username) {
+  if (STATE.role !== 'admin') return;
+  const normalizedUsername = String(username || STATE.gpuAccountingActiveUser || '').trim();
+  if (!normalizedUsername) {
+    toast('缺少业务用户标识', 'warn');
+    return;
+  }
+  document.getElementById('gpu-temp-quota-title').textContent = `添加临时额度 · ${normalizedUsername}`;
+  document.getElementById('gpu-temp-quota-username').value = normalizedUsername;
+  document.getElementById('gpu-temp-extra-hours').value = '48';
+  document.getElementById('gpu-temp-effective-weeks').value = '1';
+  document.getElementById('gpu-temp-note').value = '';
+  openModal('modal-gpu-temp-quota');
+}
+
+async function saveGpuTempQuota() {
+  const username = document.getElementById('gpu-temp-quota-username').value.trim();
+  const extraHours = parseInt(document.getElementById('gpu-temp-extra-hours').value, 10);
+  const effectiveWeeks = parseInt(document.getElementById('gpu-temp-effective-weeks').value, 10);
+  const note = document.getElementById('gpu-temp-note').value.trim();
+  if (Number.isNaN(extraHours) || extraHours <= 0) {
+    toast('追加额度必须是大于 0 的整数', 'warn');
+    return;
+  }
+  if (Number.isNaN(effectiveWeeks) || effectiveWeeks <= 0 || effectiveWeeks > 52) {
+    toast('生效周数必须位于 1 到 52 之间', 'warn');
+    return;
+  }
+  const submitBtn = document.getElementById('gpu-temp-quota-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '添加中...';
+  const res = await api(`/api/gpu-accounting/users/${encodeURIComponent(username)}/temp-quotas`, {
+    method: 'POST',
+    body: JSON.stringify({
+      extra_hours_per_week: extraHours,
+      effective_weeks: effectiveWeeks,
+      note
+    })
+  });
+  submitBtn.disabled = false;
+  submitBtn.textContent = '添加';
+  if (res.ok) {
+    closeModal('modal-gpu-temp-quota');
+    toast('临时额度已添加', 'ok');
+    await loadGpuAccountingSummary(true);
+    if (STATE.gpuAccountingActiveUser === username) {
+      await openGpuUserDetail(username);
+    }
+    loadAuditLogs();
+  } else {
+    toast(res.error || '临时额度添加失败', 'danger');
+  }
+}
+
+async function deleteGpuTempQuota(quotaId, username) {
+  if (STATE.role !== 'admin') return;
+  if (!confirm('确认删除这条临时额度记录？')) return;
+  const res = await api(`/api/gpu-accounting/temp-quotas/${encodeURIComponent(quotaId)}`, {
+    method: 'DELETE'
+  });
+  if (res.ok) {
+    toast('临时额度记录已删除', 'warn');
+    await loadGpuAccountingSummary(true);
+    if (username) {
+      await openGpuUserDetail(username);
+    }
+    loadAuditLogs();
+  } else {
+    toast(res.error || '临时额度删除失败', 'danger');
+  }
 }
 
 /* ═══════════════════════════════════════════════
@@ -3621,6 +4449,7 @@ async function loadAuditLogs() {
 ═══════════════════════════════════════════════ */
 (async function init() {
   await loadOverview();
+  await loadGpuAccountingSummary(true);
   if (STATE.role === 'admin') { await loadUsers(); }
   await loadAuditLogs();
   setInterval(loadAuditLogs, 10000);

@@ -1349,6 +1349,55 @@ def container_metrics():
         "collected_at": now(),
     })
 
+@app.route("/gpu/accounting")
+@auth_required
+def gpu_accounting():
+    running_names, running_error = list_managed_container_names(include_stopped=False)
+    if running_names is None:
+        return jsonify({"ok": False, "containers": [], "error": running_error}), 500
+
+    managed_details = {}
+    errors = []
+    for name in running_names:
+        details, inspect_error = inspect_container_details(name)
+        if not details:
+            errors.append(f"{name}: {inspect_error}")
+            continue
+        managed_details[name] = details
+
+    gpu_metrics, gpu_errors = collect_container_gpu_metrics(managed_details)
+    errors.extend(gpu_errors)
+
+    containers = []
+    for name, details in managed_details.items():
+        labels = details.get("labels", {}) or {}
+        gpu = gpu_metrics.get(name, {
+            "enabled": False,
+            "driver": "",
+            "configured_devices": [],
+            "devices": [],
+            "utilization_supported": False,
+            "utilization_reason": "",
+            "total_memory_used_bytes": 0,
+            "total_util_percent": None,
+            "active_process_count": 0,
+        })
+        containers.append({
+            "id": details.get("id", ""),
+            "name": name,
+            "status": details.get("status", "unknown"),
+            "assigned_to": str(labels.get("manager.assigned_to") or "").strip(),
+            "login_user": str(labels.get("manager.login_user") or "").strip(),
+            "gpu": gpu,
+        })
+    containers.sort(key=lambda item: item.get("name", ""))
+    return jsonify({
+        "ok": True,
+        "containers": containers,
+        "errors": errors,
+        "collected_at": now(),
+    })
+
 @app.route("/containers/create", methods=["POST"])
 @auth_required
 def create_container():
