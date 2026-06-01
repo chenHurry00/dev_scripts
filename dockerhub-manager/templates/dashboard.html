@@ -569,6 +569,37 @@ body {
 
 .table-search::placeholder { color: var(--text-lo); }
 
+.table-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.table-tools .table-search,
+.table-tools .table-filter {
+  width: 180px;
+}
+
+.table-filter {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-hi);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  appearance: none;
+}
+
+.table-filter:focus {
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -629,9 +660,25 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   text-overflow: ellipsis;
 }
 
+.runtime-metrics-line.wrap {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
 .runtime-metrics-extra {
   display: grid;
   gap: 2px;
+}
+
+.gpu-device-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.gpu-device-item {
+  white-space: nowrap;
 }
 
 .runtime-metrics .metric-muted {
@@ -1272,6 +1319,15 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
     grid-template-columns: 1fr;
   }
 
+  .table-tools {
+    justify-content: stretch;
+  }
+
+  .table-tools .table-search,
+  .table-tools .table-filter {
+    width: 100%;
+  }
+
   .stat-grid {
     grid-template-columns: 1fr;
   }
@@ -1491,7 +1547,17 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
         <div class="table-wrap">
           <div class="table-header">
             <div class="table-title">所有容器</div>
-            <input class="table-search" type="text" placeholder="搜索容器…" oninput="filterTable(this,'ctr-table-body')">
+            <div class="table-tools">
+              <select class="table-filter" id="ctr-filter-kind" onchange="updateContainerFilterOptions(); renderContainersTable()">
+                <option value="all">全部容器</option>
+                <option value="server">按服务器</option>
+                <option value="user">按使用者</option>
+              </select>
+              <select class="table-filter" id="ctr-filter-value" onchange="renderContainersTable()">
+                <option value="">全部</option>
+              </select>
+              <input class="table-search" type="text" id="ctr-search" placeholder="搜索容器…" oninput="renderContainersTable()">
+            </div>
           </div>
           <table>
             <thead>
@@ -2892,22 +2958,25 @@ function renderContainerGpuMetrics(container, metric) {
   if (!activeDevices.length) {
     detailText = '当前无 GPU 进程';
   } else {
-    detailText = activeDevices.map(device => {
+    detailText = `<div class="gpu-device-list">` + activeDevices.map(device => {
       const memoryText = formatBytesCompact(device.container_memory_used_bytes || 0);
       const utilText = gpu.utilization_supported
         ? formatPercent(device.container_util_percent || 0)
         : '仅显存';
-      return `#${escapeHtml(device.id)} ${escapeHtml(memoryText)} / ${escapeHtml(utilText)}`;
-    }).join(' · ');
+      return `<span class="gpu-device-item">#${escapeHtml(device.id)} ${escapeHtml(memoryText)} / ${escapeHtml(utilText)}</span>`;
+    }).join('') + `</div>`;
   }
 
   if (!gpu.utilization_supported && gpu.utilization_reason) {
-    detailText += detailText ? ' · ' : '';
-    detailText += escapeHtml(gpu.utilization_reason);
+    if (!activeDevices.length) {
+      detailText += escapeHtml(gpu.utilization_reason);
+    } else {
+      detailText += `<div class="gpu-device-item">${escapeHtml(gpu.utilization_reason)}</div>`;
+    }
   }
 
   if (detailText) {
-    lines.push(`<div class="metric-muted runtime-metrics-line">${detailText}</div>`);
+    lines.push(`<div class="metric-muted runtime-metrics-line wrap">${detailText}</div>`);
   }
 
   return lines.join('');
@@ -2975,13 +3044,41 @@ function renderServerCheckCell(server) {
 
 function renderContainersTable() {
   const tbody = document.getElementById('ctr-table-body');
-  if (!STATE.containers.length) {
+  const searchInput = document.getElementById('ctr-search');
+  const filterKindInput = document.getElementById('ctr-filter-kind');
+  const filterValueInput = document.getElementById('ctr-filter-value');
+  const search = (searchInput && searchInput.value || '').trim().toLowerCase();
+  const filterKind = (filterKindInput && filterKindInput.value) || 'all';
+  const filterValue = (filterValueInput && filterValueInput.value || '').trim();
+
+  const filteredContainers = STATE.containers.filter(container => {
+    if (filterKind === 'server' && filterValue && container.server !== filterValue) {
+      return false;
+    }
+    if (filterKind === 'user' && filterValue && (container.user || '') !== filterValue) {
+      return false;
+    }
+    if (!search) {
+      return true;
+    }
+    const haystack = [
+      container.name,
+      container.user,
+      container.server,
+      container.image,
+      container.login_user,
+      container.ssh_cmd
+    ].join(' ').toLowerCase();
+    return haystack.includes(search);
+  });
+
+  if (!filteredContainers.length) {
     tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">
-      <div class="empty-icon">⬡</div><div class="empty-title">暂无容器</div>
+      <div class="empty-icon">⬡</div><div class="empty-title">${STATE.containers.length ? '没有匹配的容器' : '暂无容器'}</div>
     </div></td></tr>`;
     return;
   }
-  tbody.innerHTML = STATE.containers.map(c => `
+  tbody.innerHTML = filteredContainers.map(c => `
     <tr>
       <td class="td-hi">${c.name}</td>
       <td>${c.user || '—'}</td>
@@ -2998,6 +3095,29 @@ function renderContainersTable() {
         <button class="btn btn-danger" onclick="delContainer('${c.id}')">删除</button>
       </td>
     </tr>`).join('');
+}
+
+function updateContainerFilterOptions() {
+  const kindInput = document.getElementById('ctr-filter-kind');
+  const valueInput = document.getElementById('ctr-filter-value');
+  if (!kindInput || !valueInput) return;
+  const kind = kindInput.value || 'all';
+  const previousValue = valueInput.value || '';
+  let options = [];
+  if (kind === 'server') {
+    options = [...new Set(STATE.containers.map(item => item.server).filter(Boolean))].sort();
+  } else if (kind === 'user') {
+    options = [...new Set(STATE.containers.map(item => item.user).filter(Boolean))].sort();
+  }
+  valueInput.disabled = kind === 'all';
+  valueInput.innerHTML = '<option value="">全部</option>' + options.map(option =>
+    `<option value="${escapeHtml(option)}">${escapeHtml(option)}</option>`
+  ).join('');
+  if (options.includes(previousValue)) {
+    valueInput.value = previousValue;
+  } else {
+    valueInput.value = '';
+  }
 }
 
 function ensureContainerMetricsTimer() {
@@ -3108,6 +3228,7 @@ async function loadContainers() {
   const data = await api('/api/containers');
   STATE.containers = data.containers || [];
   document.getElementById('badge-ctr').textContent = STATE.containers.length;
+  updateContainerFilterOptions();
   renderContainersTable();
   ensureContainerMetricsTimer();
   if (STATE.containers.length) {
