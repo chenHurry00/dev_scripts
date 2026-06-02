@@ -37,7 +37,11 @@ DATA_FILE = Path("data.json")
 APP_DIR = Path(__file__).resolve().parent
 GPU_ACCOUNTING_DB = APP_DIR / "gpu_accounting.db"
 SSH_PORT_MIN = 32000
-SSH_PORT_MAX = 32999
+SSH_PORT_MAX = 32199
+EXTRA_PORT_MIN = 32200
+EXTRA_PORT_MAX = 32999
+DEFAULT_EXTRA_PORT_COUNT = 5
+MAX_EXTRA_PORT_COUNT = 32
 DEFAULT_SSH_IMAGE = "lscr.io/linuxserver/openssh-server:latest"
 PANEL_VERSION = "0.4.0"
 AUDIT_LOG_LIMIT = 2000
@@ -1078,6 +1082,132 @@ def build_ssh_cmd(login_user, ssh_port, ssh_host):
         return ""
     return f"ssh -p {ssh_port} {login_user}@{ssh_host}"
 
+def normalize_runtime_options(raw_options):
+    options = raw_options if isinstance(raw_options, dict) else {}
+    network_mode = str(options.get("network_mode", "bridge") or "bridge").strip().lower() or "bridge"
+    if network_mode not in {"bridge", "host", "none"}:
+        network_mode = "bridge"
+    ipc_mode = str(options.get("ipc_mode", "private") or "private").strip().lower() or "private"
+    if ipc_mode not in {"private", "host"}:
+        ipc_mode = "private"
+    shm_size = str(options.get("shm_size", "") or "").strip()
+    if shm_size and not re.match(r"^[1-9][0-9]*(m|g|M|G)?$", shm_size):
+        shm_size = ""
+    elif shm_size:
+        match = re.match(r"^([1-9][0-9]*)([mMgG]?)$", shm_size)
+        if match:
+            number, suffix = match.groups()
+            shm_size = f"{number}{suffix.upper()}" if suffix else number
+    raw_ulimits = options.get("ulimits", {})
+    ulimits = {}
+    if isinstance(raw_ulimits, dict):
+        for key in ("memlock", "stack", "nofile"):
+            value = str(raw_ulimits.get(key, "") or "").strip()
+            if not value:
+                continue
+            if re.match(r"^-?[0-9]+(?::-?[0-9]+)?$", value):
+                ulimits[key] = value
+    raw_caps = options.get("cap_add", [])
+    cap_add = []
+    if isinstance(raw_caps, list):
+        for item in raw_caps:
+            cap = str(item or "").strip().upper()
+            if cap == "SYS_PTRACE" and cap not in cap_add:
+                cap_add.append(cap)
+    return {
+        "network_mode": network_mode,
+        "ipc_mode": ipc_mode,
+        "shm_size": shm_size,
+        "ulimits": ulimits,
+        "cap_add": cap_add,
+    }
+
+def normalize_extra_port_count(value, default=DEFAULT_EXTRA_PORT_COUNT):
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = default
+    if count < 0:
+        count = 0
+    if count > MAX_EXTRA_PORT_COUNT:
+        count = MAX_EXTRA_PORT_COUNT
+    return count
+
+def normalize_container_port_value(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+def build_default_extra_port_bindings(extra_port_count):
+    bindings = []
+    for index in range(extra_port_count):
+        bindings.append({
+            "host_port": None,
+            "container_port": 8000 + index,
+            "protocol": "tcp",
+        })
+    return bindings
+
+def normalize_extra_port_bindings(raw_bindings, extra_port_count=None):
+    count = normalize_extra_port_count(
+        extra_port_count if extra_port_count is not None else (len(raw_bindings) if isinstance(raw_bindings, list) else DEFAULT_EXTRA_PORT_COUNT),
+        default=DEFAULT_EXTRA_PORT_COUNT,
+    )
+    items = raw_bindings if isinstance(raw_bindings, list) else []
+    normalized = []
+    for index in range(count):
+        item = items[index] if index < len(items) and isinstance(items[index], dict) else {}
+        host_port = item.get("host_port")
+        if host_port in ("", None):
+            host_port = None
+        else:
+            try:
+                host_port = int(host_port)
+            except (TypeError, ValueError):
+                host_port = None
+        container_port = normalize_container_port_value(item.get("container_port"))
+        if container_port is None:
+            container_port = 8000 + index
+        normalized.append({
+            "host_port": host_port,
+            "container_port": container_port,
+            "protocol": "tcp",
+        })
+    return normalized
+
+def format_port_mapping_rules(extra_port_bindings, ssh_host):
+    rules = []
+    host_text = ssh_host or "<SERVER_HOST>"
+    for binding in extra_port_bindings or []:
+        host_port = binding.get("host_port")
+        container_port = binding.get("container_port")
+        protocol = str(binding.get("protocol", "tcp") or "tcp").lower()
+        if not host_port or not container_port:
+            continue
+        rules.append(f"{host_text}:{host_port} -> container:{container_port}/{protocol}")
+    return rules
+
+def build_connection_bundle(login_user, ssh_port, ssh_host, extra_port_bindings):
+    ssh_cmd = build_ssh_cmd(login_user, ssh_port, ssh_host)
+    lines = []
+    if ssh_cmd:
+        lines.append(ssh_cmd)
+    port_rules = format_port_mapping_rules(extra_port_bindings, ssh_host)
+    if port_rules:
+        if lines:
+            lines.append("")
+        lines.append("# 端口映射")
+        lines.extend(port_rules)
+    return {
+        "ssh_cmd": ssh_cmd,
+        "port_rules": port_rules,
+        "copy_text": "\n".join(lines).strip(),
+    }
+
 def parse_label_bool(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -1184,6 +1314,8 @@ def register_container_record(
     password_access=None,
     config_volume="",
     password_file="",
+    runtime_options=None,
+    extra_port_bindings=None,
     agent_container_id="",
     status="running",
     created_at="",
@@ -1200,6 +1332,13 @@ def register_container_record(
     next_ssh_port = ssh_port if ssh_port is not None else record.get("ssh_port")
     ssh_host = server.get("ssh_host") or server.get("host", "server-host")
     next_created_by = created_by or record.get("created_by", "")
+    next_runtime_options = normalize_runtime_options(runtime_options if runtime_options is not None else record.get("runtime_options", {}))
+    fallback_extra_port_count = 0 if not is_new and not record.get("extra_port_bindings") and extra_port_bindings is None else DEFAULT_EXTRA_PORT_COUNT
+    next_extra_port_bindings = normalize_extra_port_bindings(
+        extra_port_bindings if extra_port_bindings is not None else record.get("extra_port_bindings", []),
+        extra_port_count=len(extra_port_bindings) if isinstance(extra_port_bindings, list) else len(record.get("extra_port_bindings", []) or []) or fallback_extra_port_count,
+    )
+    bundle = build_connection_bundle(next_login_user, next_ssh_port, ssh_host, next_extra_port_bindings)
     if recovered and is_new and not next_created_by:
         next_created_by = "__recovered__"
     record.update({
@@ -1209,7 +1348,9 @@ def register_container_record(
         "server_id": server_id,
         "image": image or record.get("image", ""),
         "ssh_port": next_ssh_port,
-        "ssh_cmd": build_ssh_cmd(next_login_user, next_ssh_port, ssh_host),
+        "ssh_cmd": bundle["ssh_cmd"],
+        "connection_copy_text": bundle["copy_text"],
+        "port_rules": bundle["port_rules"],
         "login_user": next_login_user,
         "mounts": mounts if mounts is not None else record.get("mounts", []),
         "cpu_limit": cpu_limit or record.get("cpu_limit", ""),
@@ -1225,6 +1366,8 @@ def register_container_record(
         "password_access": bool(password_access if password_access is not None else record.get("password_access", False)),
         "config_volume": config_volume or record.get("config_volume", ""),
         "password_file": password_file or record.get("password_file", ""),
+        "runtime_options": next_runtime_options,
+        "extra_port_bindings": next_extra_port_bindings,
         "status": status or record.get("status", "unknown"),
         "created_at": created_at or record.get("created_at", datetime.now().isoformat()),
         "created_by": next_created_by,
@@ -1272,6 +1415,8 @@ def reconcile_containers(data):
                 password_access=parse_label_bool(labels.get("manager.password_access")) if "manager.password_access" in labels else None,
                 config_volume=labels.get("manager.config_volume", ""),
                 password_file=labels.get("manager.password_file", ""),
+                runtime_options=agent_container.get("runtime_options", {}),
+                extra_port_bindings=agent_container.get("extra_port_bindings", []),
                 created_at=agent_container.get("created_at", ""),
                 recovered=True,
             )
@@ -1316,6 +1461,8 @@ def adopt_agent_container(data, server_id, server, name, defaults):
             password_access=parse_label_bool(agent_container.get("labels", {}).get("manager.password_access")) if "manager.password_access" in agent_container.get("labels", {}) else defaults.get("password_access"),
             config_volume=agent_container.get("labels", {}).get("manager.config_volume", defaults.get("config_volume", "")),
             password_file=agent_container.get("labels", {}).get("manager.password_file", defaults.get("password_file", "")),
+            runtime_options=agent_container.get("runtime_options", defaults.get("runtime_options", {})),
+            extra_port_bindings=agent_container.get("extra_port_bindings", defaults.get("extra_port_bindings", [])),
             agent_container_id=agent_container.get("container_id", ""),
             status=agent_container.get("status", "running"),
             created_at=agent_container.get("created_at", ""),
@@ -1347,6 +1494,41 @@ def choose_available_ssh_port(server, existing_records=None):
         if port not in used_ports:
             return port
     return None
+
+def choose_available_extra_port_block(server, existing_records=None, count=DEFAULT_EXTRA_PORT_COUNT):
+    count = normalize_extra_port_count(count)
+    if count <= 0:
+        return []
+    used_ports = set()
+    result = call_agent(server, "/containers", timeout=30)
+    if result.get("status_code", 200) < 400 and not result.get("error"):
+        for raw in result.get("containers", []):
+            agent_container = normalize_agent_container(raw)
+            if not agent_container:
+                continue
+            for binding in agent_container.get("extra_port_bindings", []):
+                host_port = binding.get("host_port")
+                try:
+                    if host_port:
+                        used_ports.add(int(host_port))
+                except (TypeError, ValueError):
+                    continue
+    for record in existing_records or []:
+        for binding in record.get("extra_port_bindings", []) or []:
+            host_port = binding.get("host_port")
+            try:
+                if host_port:
+                    used_ports.add(int(host_port))
+            except (TypeError, ValueError):
+                continue
+    for start in range(EXTRA_PORT_MIN, EXTRA_PORT_MAX - count + 2):
+        block = list(range(start, start + count))
+        if all(port not in used_ports for port in block):
+            return block
+    available = [port for port in range(EXTRA_PORT_MIN, EXTRA_PORT_MAX + 1) if port not in used_ports]
+    if len(available) < count:
+        return []
+    return available[:count]
 
 def normalize_mount_roots(raw):
     """规范化服务器挂载根目录配置。"""
@@ -1704,6 +1886,10 @@ def api_containers():
                 "password_access": bool(c.get("password_access", False)),
                 "config_volume": c.get("config_volume", ""),
                 "password_file": c.get("password_file", ""),
+                "runtime_options": normalize_runtime_options(c.get("runtime_options", {})),
+                "extra_port_bindings": normalize_extra_port_bindings(c.get("extra_port_bindings", [])),
+                "connection_copy_text": c.get("connection_copy_text", ""),
+                "port_rules": c.get("port_rules", []),
                 "mounts": c.get("mounts", []),
                 "status": c.get("status", "running"),
                 "created_at": c.get("created_at", ""),
@@ -2201,6 +2387,11 @@ def api_create_container():
     login_user = safe_container_name(body.get("login_user") or assigned_to or "dockeruser", "dockeruser")
     name = build_container_name(body.get("name", ""), assigned_to, login_user)
     ssh_host = server.get("ssh_host") or server.get("host", "server-host")
+    runtime_options = normalize_runtime_options(body.get("runtime_options", {}))
+    extra_port_count = normalize_extra_port_count(body.get("extra_port_count", DEFAULT_EXTRA_PORT_COUNT))
+    extra_port_bindings = normalize_extra_port_bindings(body.get("extra_port_bindings", []), extra_port_count=extra_port_count)
+    if runtime_options.get("network_mode") != "bridge":
+        return jsonify({"error": "当前版本暂不支持对 SSH 登录型容器启用非 bridge 网络模式"}), 400
     cpu_limit = body.get("cpu_limit")
     mem_limit = body.get("mem_limit")
     if not cpu_limit or not mem_limit:
@@ -2220,6 +2411,15 @@ def api_create_container():
         ssh_port = choose_available_ssh_port(server, data["containers"].values())
         if ssh_port is None:
             return jsonify({"error": f"{SSH_PORT_MIN}-{SSH_PORT_MAX} 范围内没有可用 SSH 端口"}), 400
+    if runtime_options.get("network_mode") == "host":
+        extra_port_count = 0
+        extra_port_bindings = []
+    else:
+        allocated_ports = choose_available_extra_port_block(server, data["containers"].values(), extra_port_count)
+        if len(allocated_ports) != extra_port_count:
+            return jsonify({"error": f"{EXTRA_PORT_MIN}-{EXTRA_PORT_MAX} 范围内没有足够的可用业务端口"}), 400
+        for index, host_port in enumerate(allocated_ports):
+            extra_port_bindings[index]["host_port"] = host_port
 
     mounts = body["mounts"] if "mounts" in body else build_default_mounts(server, assigned_to, name)
     gpu_enabled = bool(body.get("gpu_enabled", False))
@@ -2236,6 +2436,7 @@ def api_create_container():
         "gpu_devices": gpu_devices,
         "gpu_mode": body.get("gpu_mode", "shared"),
         "rootfs_limit": rootfs_limit,
+        "runtime_options": runtime_options,
         "login_user": login_user,
         "ssh_public_key": body.get("ssh_public_key", ""),
         "password_access": bool(body.get("password_access", False)),
@@ -2244,6 +2445,7 @@ def api_create_container():
         "assigned_to": assigned_to,
         "mounts": mounts,
         "allowed_mount_roots": server.get("mount_roots", []),
+        "extra_port_bindings": extra_port_bindings,
     }
 
     agent_result = call_agent(server, "/containers/create", method="POST", body=agent_body, timeout=330)
@@ -2266,6 +2468,8 @@ def api_create_container():
         "password_access": agent_body["password_access"],
         "config_volume": agent_result.get("config_volume", ""),
         "password_file": agent_result.get("password_file", ""),
+        "runtime_options": runtime_options,
+        "extra_port_bindings": extra_port_bindings,
         "created_by": session["user"],
     }
     if not agent_result.get("ok"):
@@ -2285,6 +2489,9 @@ def api_create_container():
                         "ok": True,
                         "id": cid,
                         "ssh_cmd": record.get("ssh_cmd", ""),
+                        "copy_text": record.get("connection_copy_text", ""),
+                        "port_rules": record.get("port_rules", []),
+                        "extra_port_bindings": record.get("extra_port_bindings", []),
                         "name": record.get("name", name),
                         "ssh_port": record.get("ssh_port"),
                         "recovered": True,
@@ -2300,6 +2507,11 @@ def api_create_container():
     with data_lock:
         data = load_data()
         resolved_gpu_devices = agent_result.get("gpu_devices", requested_gpu_devices)
+        resolved_runtime_options = normalize_runtime_options(agent_result.get("runtime_options", runtime_options))
+        resolved_extra_port_bindings = normalize_extra_port_bindings(
+            agent_result.get("extra_port_bindings", extra_port_bindings),
+            extra_port_count=len(agent_result.get("extra_port_bindings", extra_port_bindings) or []),
+        )
         cid, record, _, _ = register_container_record(
             data,
             server_id,
@@ -2323,6 +2535,8 @@ def api_create_container():
             password_access=agent_result.get("password_access", agent_body["password_access"]),
             config_volume=agent_result.get("config_volume", ""),
             password_file=agent_result.get("password_file", ""),
+            runtime_options=resolved_runtime_options,
+            extra_port_bindings=resolved_extra_port_bindings,
             agent_container_id=agent_result.get("container_id", ""),
             status=agent_result.get("status", "running"),
             created_at=datetime.now().isoformat(),
@@ -2334,8 +2548,12 @@ def api_create_container():
         "ok": True,
         "id": cid,
         "ssh_cmd": record.get("ssh_cmd", build_ssh_cmd(login_user, final_ssh_port, ssh_host)),
+        "copy_text": record.get("connection_copy_text", ""),
+        "port_rules": record.get("port_rules", []),
+        "extra_port_bindings": record.get("extra_port_bindings", []),
         "name": record.get("name", name),
         "ssh_port": record.get("ssh_port"),
+        "runtime_options": record.get("runtime_options", {}),
     })
 
 @app.route("/api/containers/<cid>", methods=["DELETE"])
@@ -2477,6 +2695,11 @@ def api_rebuild_container(cid):
         "gpu_devices": body.get("gpu_devices", container.get("gpu_devices", [])),
         "gpu_mode": body.get("gpu_mode", container.get("gpu_mode", "shared") or "shared"),
         "rootfs_limit": str(body.get("rootfs_limit", container.get("rootfs_limit", "")) or "").strip(),
+        "runtime_options": normalize_runtime_options(body.get("runtime_options", container.get("runtime_options", {}))),
+        "extra_port_bindings": normalize_extra_port_bindings(
+            body.get("extra_port_bindings", container.get("extra_port_bindings", [])),
+            extra_port_count=len(body.get("extra_port_bindings", container.get("extra_port_bindings", [])) or []),
+        ),
         "source_type": body.get("source_type", "temporary_snapshot"),
         "image_ref": body.get("image_ref", ""),
     }
@@ -2500,13 +2723,25 @@ def api_rebuild_container(cid):
         container["gpu_devices"] = result.get("gpu_devices", payload["gpu_devices"]) if isinstance(result.get("gpu_devices", payload["gpu_devices"]), list) else payload["gpu_devices"]
         container["gpu_mode"] = result.get("gpu_mode", payload["gpu_mode"] if container["gpu_enabled"] else "")
         container["rootfs_limit"] = result.get("rootfs_limit", payload["rootfs_limit"])
+        container["runtime_options"] = normalize_runtime_options(result.get("runtime_options", payload["runtime_options"]))
+        container["extra_port_bindings"] = normalize_extra_port_bindings(
+            result.get("extra_port_bindings", payload["extra_port_bindings"]),
+            extra_port_count=len(result.get("extra_port_bindings", payload["extra_port_bindings"]) or []),
+        )
         container["password_file"] = ""
         container["status"] = result.get("status", "running")
         container["agent_container_id"] = result.get("container_id", container.get("agent_container_id", ""))
+        bundle = build_connection_bundle(
+            container.get("login_user", "dockeruser"),
+            result.get("ssh_port", container.get("ssh_port")),
+            server.get("ssh_host") or server.get("host", "server-host"),
+            container.get("extra_port_bindings", []),
+        )
         if result.get("ssh_port"):
             container["ssh_port"] = result.get("ssh_port")
-            server_ssh_host = server.get("ssh_host") or server.get("host", "server-host")
-            container["ssh_cmd"] = build_ssh_cmd(container.get("login_user", "dockeruser"), container["ssh_port"], server_ssh_host)
+        container["ssh_cmd"] = bundle["ssh_cmd"]
+        container["connection_copy_text"] = bundle["copy_text"]
+        container["port_rules"] = bundle["port_rules"]
         if result.get("image"):
             container["image"] = result.get("image")
         if result.get("image_mode"):

@@ -32,7 +32,11 @@ AGENT_TOKEN  = os.environ.get("AGENT_TOKEN", "changeme-agent-token")
 AGENT_PORT   = int(os.environ.get("AGENT_PORT", 5001))
 WORKDIR = Path(__file__).resolve().parent
 SSH_PORT_MIN = 32000
-SSH_PORT_MAX = 32999
+SSH_PORT_MAX = 32199
+EXTRA_PORT_MIN = 32200
+EXTRA_PORT_MAX = 32999
+DEFAULT_EXTRA_PORT_COUNT = 5
+MAX_EXTRA_PORT_COUNT = 32
 DEFAULT_SSH_IMAGE = "lscr.io/linuxserver/openssh-server:latest"
 AGENT_VERSION = "0.4.0"
 
@@ -167,6 +171,36 @@ def inspect_container_details(name):
             break
     if not ssh_port and ports:
         ssh_port = ports[0]["host_port"]
+    runtime_options = normalize_runtime_options({
+        "network_mode": labels.get("manager.network_mode", host_config.get("NetworkMode", "bridge")),
+        "ipc_mode": labels.get("manager.ipc_mode", host_config.get("IpcMode", "private")),
+        "shm_size": labels.get("manager.shm_size", ""),
+        "ulimits": {
+            "memlock": labels.get("manager.ulimit.memlock", ""),
+            "stack": labels.get("manager.ulimit.stack", ""),
+            "nofile": labels.get("manager.ulimit.nofile", ""),
+        },
+        "cap_add": [item for item in str(labels.get("manager.cap_add", "") or "").split(",") if item.strip()],
+    })
+    extra_port_bindings = []
+    for binding in extract_container_port_bindings(raw):
+        host_port = str(binding.get("host_port") or "").strip()
+        container_port = str(binding.get("container_port") or "").strip()
+        if not host_port or not container_port or container_port == f"{label_port}/tcp":
+            continue
+        if not container_port.endswith("/tcp"):
+            continue
+        port_value = normalize_container_port_value(container_port.split("/", 1)[0])
+        host_value = normalize_container_port_value(host_port)
+        if port_value is None or host_value is None:
+            continue
+        extra_port_bindings.append({
+            "host_port": host_value,
+            "container_port": port_value,
+            "protocol": "tcp",
+            "host_ip": str(binding.get("host_ip") or "").strip(),
+        })
+    extra_port_bindings.sort(key=lambda item: int(item.get("host_port") or 0))
     pids_limit = host_config.get("PidsLimit")
     try:
         pids_limit = int(pids_limit)
@@ -185,6 +219,8 @@ def inspect_container_details(name):
         ),
         "ssh_port": ssh_port,
         "pids_limit": pids_limit,
+        "runtime_options": runtime_options,
+        "extra_port_bindings": extra_port_bindings,
     }, None
 
 def inspect_image_details(image_ref):
@@ -488,10 +524,16 @@ def resolve_rebuild_gpu_settings(body, labels):
         "gpu_cli_value": gpu_cli_value,
     }, ""
 
-def build_rebuild_create_command(raw, image_ref, image_mode, resource_settings, gpu_settings, rootfs_limit, labels, allow_sudo):
+def build_rebuild_create_command(raw, image_ref, image_mode, resource_settings, gpu_settings, rootfs_limit, labels, allow_sudo, runtime_options, extra_port_bindings):
     host_config = raw.get("HostConfig", {}) or {}
     raw_config = raw.get("Config", {}) or {}
     password_access = resolve_password_access(labels, raw_config)
+    ssh_container_port = str((labels or {}).get("manager.container_ssh_port") or "22").strip() or "22"
+    ssh_publish_binding = None
+    for binding in extract_container_port_bindings(raw):
+        if str(binding.get("container_port") or "").strip() == f"{ssh_container_port}/tcp":
+            ssh_publish_binding = binding
+            break
     cmd = [
         "docker", "create",
         "--name", (raw.get("Name") or "").lstrip("/"),
@@ -512,10 +554,19 @@ def build_rebuild_create_command(raw, image_ref, image_mode, resource_settings, 
     for item in security_opts:
         cmd += ["--security-opt", item]
 
-    for binding in extract_container_port_bindings(raw):
-        publish_value = build_publish_arg(binding)
+    if ssh_publish_binding:
+        publish_value = build_publish_arg(ssh_publish_binding)
         if publish_value:
             cmd += ["-p", publish_value]
+    if runtime_options.get("network_mode") != "host":
+        for binding in extra_port_bindings:
+            publish_value = build_publish_arg({
+                "host_port": binding.get("host_port"),
+                "container_port": f"{binding.get('container_port')}/tcp",
+                "host_ip": binding.get("host_ip", ""),
+            })
+            if publish_value:
+                cmd += ["-p", publish_value]
 
     binds, _ = strip_secret_binds(host_config.get("Binds") or [])
     for bind in binds:
@@ -543,6 +594,13 @@ def build_rebuild_create_command(raw, image_ref, image_mode, resource_settings, 
     next_labels["manager.rootfs_limit"] = rootfs_limit
     next_labels["manager.allow_sudo"] = bool_label(allow_sudo)
     next_labels["manager.password_access"] = bool_label(password_access)
+    next_labels["manager.network_mode"] = runtime_options.get("network_mode", "bridge")
+    next_labels["manager.ipc_mode"] = runtime_options.get("ipc_mode", "private")
+    next_labels["manager.shm_size"] = runtime_options.get("shm_size", "")
+    next_labels["manager.ulimit.memlock"] = runtime_options.get("ulimits", {}).get("memlock", "")
+    next_labels["manager.ulimit.stack"] = runtime_options.get("ulimits", {}).get("stack", "")
+    next_labels["manager.ulimit.nofile"] = runtime_options.get("ulimits", {}).get("nofile", "")
+    next_labels["manager.cap_add"] = ",".join(runtime_options.get("cap_add", []))
     next_labels["manager.backup_kind"] = ""
     next_labels["manager.backup_source_container"] = ""
     next_labels["manager.backup_source_image"] = ""
@@ -551,6 +609,16 @@ def build_rebuild_create_command(raw, image_ref, image_mode, resource_settings, 
     for key, value in next_labels.items():
         cmd += ["--label", f"{key}={value}"]
 
+    if runtime_options.get("network_mode") != "bridge":
+        cmd += ["--network", runtime_options["network_mode"]]
+    if runtime_options.get("ipc_mode") != "private":
+        cmd += ["--ipc", runtime_options["ipc_mode"]]
+    if runtime_options.get("shm_size"):
+        cmd += ["--shm-size", runtime_options["shm_size"]]
+    for cap in runtime_options.get("cap_add", []):
+        cmd += ["--cap-add", cap]
+    for key, value in (runtime_options.get("ulimits") or {}).items():
+        cmd += ["--ulimit", f"{key}={value}"]
     if rootfs_limit:
         cmd += ["--storage-opt", f"size={rootfs_limit}"]
     if gpu_settings.get("gpu_enabled"):
@@ -1160,6 +1228,91 @@ def normalize_size_limit(value):
     number, suffix = match.groups()
     return f"{number}{suffix.upper()}" if suffix else number
 
+def normalize_runtime_options(raw_options):
+    options = raw_options if isinstance(raw_options, dict) else {}
+    network_mode = str(options.get("network_mode", "bridge") or "bridge").strip().lower() or "bridge"
+    if network_mode not in {"bridge", "host", "none"}:
+        network_mode = "bridge"
+    ipc_mode = str(options.get("ipc_mode", "private") or "private").strip().lower() or "private"
+    if ipc_mode not in {"private", "host"}:
+        ipc_mode = "private"
+    shm_size = str(options.get("shm_size", "") or "").strip()
+    if shm_size and not valid_size_limit(shm_size):
+        shm_size = ""
+    elif shm_size:
+        shm_size = normalize_size_limit(shm_size)
+    raw_ulimits = options.get("ulimits", {})
+    ulimits = {}
+    if isinstance(raw_ulimits, dict):
+        for key in ("memlock", "stack", "nofile"):
+            value = str(raw_ulimits.get(key, "") or "").strip()
+            if not value:
+                continue
+            if re.match(r"^-?[0-9]+(?::-?[0-9]+)?$", value):
+                ulimits[key] = value
+    raw_caps = options.get("cap_add", [])
+    cap_add = []
+    if isinstance(raw_caps, list):
+        for item in raw_caps:
+            cap = str(item or "").strip().upper()
+            if cap == "SYS_PTRACE" and cap not in cap_add:
+                cap_add.append(cap)
+    return {
+        "network_mode": network_mode,
+        "ipc_mode": ipc_mode,
+        "shm_size": shm_size,
+        "ulimits": ulimits,
+        "cap_add": cap_add,
+    }
+
+def normalize_extra_port_count(value, default=DEFAULT_EXTRA_PORT_COUNT):
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = default
+    if count < 0:
+        count = 0
+    if count > MAX_EXTRA_PORT_COUNT:
+        count = MAX_EXTRA_PORT_COUNT
+    return count
+
+def normalize_container_port_value(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+def normalize_extra_port_bindings(raw_bindings, extra_port_count=None):
+    count = normalize_extra_port_count(
+        extra_port_count if extra_port_count is not None else (len(raw_bindings) if isinstance(raw_bindings, list) else DEFAULT_EXTRA_PORT_COUNT),
+        default=DEFAULT_EXTRA_PORT_COUNT,
+    )
+    items = raw_bindings if isinstance(raw_bindings, list) else []
+    normalized = []
+    for index in range(count):
+        item = items[index] if index < len(items) and isinstance(items[index], dict) else {}
+        host_port = item.get("host_port")
+        if host_port in ("", None):
+            host_port = None
+        else:
+            try:
+                host_port = int(host_port)
+            except (TypeError, ValueError):
+                return []
+        container_port = normalize_container_port_value(item.get("container_port"))
+        if container_port is None:
+            container_port = 8000 + index
+        normalized.append({
+            "host_port": host_port,
+            "container_port": container_port,
+            "protocol": "tcp",
+            "host_ip": str(item.get("host_ip") or "").strip(),
+        })
+    return normalized
+
 def normalize_gpu_device_list(raw_devices):
     if raw_devices in (None, "", []):
         return []
@@ -1388,6 +1541,8 @@ def gpu_accounting():
             "status": details.get("status", "unknown"),
             "assigned_to": str(labels.get("manager.assigned_to") or "").strip(),
             "login_user": str(labels.get("manager.login_user") or "").strip(),
+            "runtime_options": details.get("runtime_options", {}),
+            "extra_port_bindings": details.get("extra_port_bindings", []),
             "gpu": gpu,
         })
     containers.sort(key=lambda item: item.get("name", ""))
@@ -1432,8 +1587,13 @@ def create_container():
     gpu_devices = normalize_gpu_device_list(body.get("gpu_devices", []))
     gpu_mode = str(body.get("gpu_mode", "shared") or "shared").strip() or "shared"
     rootfs_limit = str(body.get("rootfs_limit", "") or "").strip()
+    runtime_options = normalize_runtime_options(body.get("runtime_options", {}))
     mounts   = body.get("mounts", [])
     allowed_roots = body.get("allowed_mount_roots", [])
+    extra_port_bindings = normalize_extra_port_bindings(
+        body.get("extra_port_bindings", []),
+        extra_port_count=body.get("extra_port_count"),
+    )
 
     ssh_port = None
     if str(raw_ssh_port or "").strip():
@@ -1446,6 +1606,25 @@ def create_container():
                 "ok": False,
                 "error": f"SSH 端口必须位于 {SSH_PORT_MIN}-{SSH_PORT_MAX}"
             }), 400
+    if runtime_options.get("network_mode") == "host":
+        if extra_port_bindings:
+            return jsonify({"ok": False, "error": "Host 网络模式不支持自动业务端口映射"}), 400
+    else:
+        used_host_ports = set()
+        used_container_ports = set()
+        for binding in extra_port_bindings:
+            host_port = normalize_container_port_value(binding.get("host_port"))
+            container_port = normalize_container_port_value(binding.get("container_port"))
+            if host_port is None or host_port < EXTRA_PORT_MIN or host_port > EXTRA_PORT_MAX:
+                return jsonify({"ok": False, "error": f"业务端口必须位于 {EXTRA_PORT_MIN}-{EXTRA_PORT_MAX}"}), 400
+            if container_port is None:
+                return jsonify({"ok": False, "error": "容器内业务端口无效"}), 400
+            if host_port in used_host_ports:
+                return jsonify({"ok": False, "error": f"业务宿主机端口重复: {host_port}"}), 400
+            if container_port in used_container_ports:
+                return jsonify({"ok": False, "error": f"容器内业务端口重复: {container_port}"}), 400
+            used_host_ports.add(host_port)
+            used_container_ports.add(container_port)
     if not valid_memory(memory):
         return jsonify({"ok": False, "error": "内存限制格式无效"}), 400
     try:
@@ -1592,7 +1771,7 @@ def create_container():
     for _ in range(max_attempts):
         selected_ssh_port = ssh_port or find_available_ssh_port()
         if not selected_ssh_port:
-            err = "32000-32999 范围内没有可用 SSH 端口"
+            err = f"{SSH_PORT_MIN}-{SSH_PORT_MAX} 范围内没有可用 SSH 端口"
             break
         cmd = [
             "docker", "run", "-d",
@@ -1614,15 +1793,35 @@ def create_container():
             "--label", f"manager.rootfs_limit={rootfs_limit}",
             "--label", f"manager.allow_sudo={bool_label(allow_sudo)}",
             "--label", f"manager.password_access={bool_label(password_access)}",
+            "--label", f"manager.network_mode={runtime_options['network_mode']}",
+            "--label", f"manager.ipc_mode={runtime_options['ipc_mode']}",
+            "--label", f"manager.shm_size={runtime_options['shm_size']}",
+            "--label", f"manager.ulimit.memlock={runtime_options['ulimits'].get('memlock', '')}",
+            "--label", f"manager.ulimit.stack={runtime_options['ulimits'].get('stack', '')}",
+            "--label", f"manager.ulimit.nofile={runtime_options['ulimits'].get('nofile', '')}",
+            "--label", f"manager.cap_add={','.join(runtime_options['cap_add'])}",
             "--restart", "unless-stopped",
         ] + mount_args
         if not allow_sudo:
             cmd += ["--security-opt", "no-new-privileges"]
 
+        if runtime_options["network_mode"] != "bridge":
+            cmd += ["--network", runtime_options["network_mode"]]
+        if runtime_options["ipc_mode"] != "private":
+            cmd += ["--ipc", runtime_options["ipc_mode"]]
+        if runtime_options["shm_size"]:
+            cmd += ["--shm-size", runtime_options["shm_size"]]
+        for cap in runtime_options["cap_add"]:
+            cmd += ["--cap-add", cap]
+        for key, value in runtime_options["ulimits"].items():
+            cmd += ["--ulimit", f"{key}={value}"]
         if rootfs_limit:
             cmd += ["--storage-opt", f"size={rootfs_limit}"]
         if gpu_enabled:
             cmd += ["--gpus", gpu_cli_value]
+        if runtime_options["network_mode"] != "host":
+            for binding in extra_port_bindings:
+                cmd += ["-p", f"{binding['host_port']}:{binding['container_port']}"]
         if password_file:
             cmd += [
                 "--label", f"manager.password_file={password_file}",
@@ -1710,6 +1909,8 @@ def create_container():
         "gpu_devices":  selected_gpu_devices,
         "gpu_mode":     gpu_mode if gpu_enabled else "",
         "rootfs_limit": rootfs_limit,
+        "runtime_options": runtime_options,
+        "extra_port_bindings": extra_port_bindings,
     })
 
 @app.route("/containers/<name>/stop", methods=["POST"])
@@ -1863,6 +2064,24 @@ def rebuild_container(name):
     gpu_settings, gpu_error = resolve_rebuild_gpu_settings(body, labels)
     if not gpu_settings:
         return jsonify({"ok": False, "error": gpu_error}), 400
+    runtime_options = normalize_runtime_options(body.get("runtime_options", {
+        "network_mode": labels.get("manager.network_mode", host_config.get("NetworkMode", "bridge")),
+        "ipc_mode": labels.get("manager.ipc_mode", host_config.get("IpcMode", "private")),
+        "shm_size": labels.get("manager.shm_size", ""),
+        "ulimits": {
+            "memlock": labels.get("manager.ulimit.memlock", ""),
+            "stack": labels.get("manager.ulimit.stack", ""),
+            "nofile": labels.get("manager.ulimit.nofile", ""),
+        },
+        "cap_add": parse_label_csv(labels.get("manager.cap_add", "")),
+    }))
+    if runtime_options.get("network_mode") == "host":
+        return jsonify({"ok": False, "error": "当前版本暂不支持对 SSH 登录型容器启用 Host 网络模式"}), 400
+    current_details, _ = inspect_container_details(name)
+    extra_port_bindings = normalize_extra_port_bindings(
+        body.get("extra_port_bindings", current_details.get("extra_port_bindings", []) if current_details else []),
+        extra_port_count=len(body.get("extra_port_bindings", [])) if isinstance(body.get("extra_port_bindings"), list) else None,
+    )
 
     target_image_ref = ""
     target_image_mode = current_image_mode
@@ -1906,6 +2125,8 @@ def rebuild_container(name):
         rootfs_limit,
         labels,
         allow_sudo,
+        runtime_options,
+        extra_port_bindings,
     )
     rollback_name = rollback_container_name(name)
     new_container_id = ""
@@ -1982,6 +2203,8 @@ def rebuild_container(name):
         "gpu_devices": gpu_settings.get("gpu_devices", []),
         "gpu_mode": gpu_settings.get("gpu_mode", ""),
         "rootfs_limit": rootfs_limit,
+        "runtime_options": runtime_options,
+        "extra_port_bindings": extra_port_bindings,
         "cpu": resource_settings["cpu"],
         "memory": resource_settings["memory"],
         "pids_limit": resource_settings["pids_limit"],

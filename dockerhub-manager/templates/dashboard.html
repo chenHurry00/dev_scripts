@@ -1166,11 +1166,33 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   color: var(--ok);
   font-family: var(--mono);
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   margin-top: 12px;
-  word-break: break-all;
+  word-break: break-word;
+}
+
+.ssh-output pre {
+  margin: 0;
+  white-space: pre-wrap;
+  flex: 1;
+}
+
+.port-binding-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.port-binding-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px 80px;
+  gap: 10px;
+  align-items: center;
+}
+
+.port-binding-row .form-input[readonly] {
+  opacity: 0.85;
 }
 
 .ssh-output .copy-btn {
@@ -1927,7 +1949,60 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
       <div class="form-field">
         <label class="form-label">SSH 端口（宿主机，可留空）</label>
         <input class="form-input" type="number" id="ctr-port" placeholder="留空自动分配">
-        <div class="form-hint">留空时自动从 32000-32999 选择空闲端口；手动填写时必须位于该范围且未被占用。</div>
+        <div class="form-hint">留空时自动从 32000-32199 选择空闲端口；手动填写时必须位于该范围且未被占用。</div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">网络模式</label>
+          <select class="form-select" id="ctr-network-mode" onchange="toggleCreateRuntimeFields()">
+            <option value="bridge">bridge</option>
+            <option value="host">host</option>
+            <option value="none">none</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="form-label">IPC 模式</label>
+          <select class="form-select" id="ctr-ipc-mode">
+            <option value="private">private</option>
+            <option value="host">host</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">共享内存大小</label>
+          <input class="form-input" type="text" id="ctr-shm-size" placeholder="如 16g">
+        </div>
+        <div class="form-field">
+          <label class="form-label">额外业务端口数量</label>
+          <input class="form-input" type="number" id="ctr-extra-port-count" min="0" max="32" value="5" onchange="renderCreateExtraPortBindings()">
+          <div class="form-hint" id="ctr-extra-port-hint">默认分配 5 个宿主机业务端口，宿主机端口自动分配到 32200-32999。</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">ulimit memlock</label>
+          <input class="form-input" type="text" id="ctr-ulimit-memlock" placeholder="-1">
+        </div>
+        <div class="form-field">
+          <label class="form-label">ulimit stack</label>
+          <input class="form-input" type="text" id="ctr-ulimit-stack" placeholder="67108864">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">ulimit nofile</label>
+          <input class="form-input" type="text" id="ctr-ulimit-nofile" placeholder="1048576">
+        </div>
+        <div class="form-field">
+          <label class="form-label"><input type="checkbox" id="ctr-cap-sys-ptrace"> 启用 `SYS_PTRACE`</label>
+          <div class="form-hint">用于常见调试场景；会在容器启动参数中增加 `--cap-add SYS_PTRACE`。</div>
+        </div>
+      </div>
+      <div class="form-field" id="ctr-extra-port-bindings-field">
+        <label class="form-label">额外业务端口映射</label>
+        <div class="port-binding-grid" id="ctr-extra-port-bindings"></div>
+        <div class="form-hint">宿主机端口由系统自动分配；这里只需要填写容器内端口。</div>
       </div>
       <div class="form-field">
         <label class="form-label">已注册挂载目录</label>
@@ -1941,9 +2016,9 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
         <div class="form-hint">每行一个挂载：宿主机路径|容器内路径|ro/rw。宿主机路径仍必须位于服务器已注册根目录下。</div>
       </div>
       <div id="ssh-result" style="display:none">
-        <div class="form-label" style="margin-top:12px">→ 生成的 SSH 登录命令</div>
+        <div class="form-label" style="margin-top:12px">→ 连接命令与端口映射</div>
         <div class="ssh-output">
-          <span id="ssh-cmd-text"></span>
+          <pre id="ssh-cmd-text"></pre>
           <button class="copy-btn" type="button" onclick="copySSH()">复制</button>
         </div>
       </div>
@@ -2360,6 +2435,57 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <div class="form-hint" id="edit-ctr-rootfs-hint">只限制容器自身系统层写入，不限制挂载目录、数据盘或 Docker volume。</div>
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">网络模式</label>
+            <select class="form-select" id="edit-ctr-network-mode" onchange="toggleEditRuntimeFields()">
+              <option value="bridge">bridge</option>
+              <option value="host">host</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">IPC 模式</label>
+            <select class="form-select" id="edit-ctr-ipc-mode">
+              <option value="private">private</option>
+              <option value="host">host</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">共享内存大小</label>
+            <input class="form-input" type="text" id="edit-ctr-shm-size" placeholder="如 16g">
+          </div>
+          <div class="form-field">
+            <label class="form-label">额外业务端口数量</label>
+            <input class="form-input" type="number" id="edit-ctr-extra-port-count" min="0" max="32" onchange="renderEditExtraPortBindings()">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">ulimit memlock</label>
+            <input class="form-input" type="text" id="edit-ctr-ulimit-memlock" placeholder="-1">
+          </div>
+          <div class="form-field">
+            <label class="form-label">ulimit stack</label>
+            <input class="form-input" type="text" id="edit-ctr-ulimit-stack" placeholder="67108864">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">ulimit nofile</label>
+            <input class="form-input" type="text" id="edit-ctr-ulimit-nofile" placeholder="1048576">
+          </div>
+          <div class="form-field">
+            <label class="form-label"><input type="checkbox" id="edit-ctr-cap-sys-ptrace"> 启用 `SYS_PTRACE`</label>
+          </div>
+        </div>
+        <div class="form-field" id="edit-ctr-extra-port-bindings-field">
+          <label class="form-label">额外业务端口映射</label>
+          <div class="port-binding-grid" id="edit-ctr-extra-port-bindings"></div>
+          <div class="form-hint" id="edit-ctr-extra-port-hint">修改端口映射后需要通过重建生效。</div>
+        </div>
         <div class="form-field">
           <label class="form-label">GPU 设备</label>
           <div class="check-list" id="edit-ctr-gpu-options">
@@ -2531,6 +2657,16 @@ async function openCreateContainerModal() {
   openModal('modal-create-ctr');
   document.getElementById('ssh-result').style.display = 'none';
   document.getElementById('ssh-cmd-text').textContent = '';
+  document.getElementById('ctr-network-mode').value = 'bridge';
+  document.getElementById('ctr-ipc-mode').value = 'private';
+  document.getElementById('ctr-shm-size').value = '';
+  document.getElementById('ctr-ulimit-memlock').value = '';
+  document.getElementById('ctr-ulimit-stack').value = '';
+  document.getElementById('ctr-ulimit-nofile').value = '';
+  document.getElementById('ctr-cap-sys-ptrace').checked = false;
+  document.getElementById('ctr-extra-port-count').value = '5';
+  renderCreateExtraPortBindings();
+  toggleCreateRuntimeFields();
   const select = document.getElementById('ctr-server');
   if (!select.value && STATE.servers.length === 1) {
     select.value = STATE.servers[0].id;
@@ -2598,6 +2734,7 @@ function applyCreateContainerCapabilities(server, defaults = {}) {
     gpuCheckbox.disabled = true;
     gpuHint.textContent = '选择目标服务器后读取 GPU 能力；启用后默认全选全部 GPU。';
     gpuContainer.innerHTML = '<div class="form-hint">选择目标服务器后显示可用 GPU。</div>';
+    document.getElementById('ctr-port').placeholder = '留空自动分配';
     return;
   }
 
@@ -2636,6 +2773,7 @@ function applyCreateContainerCapabilities(server, defaults = {}) {
   }
 
   toggleContainerGpuFields();
+  toggleCreateRuntimeFields();
 }
 
 function toggleContainerGpuFields() {
@@ -2787,6 +2925,78 @@ async function loadSelectedServerImages() {
 function togglePasswordAccess() {
   const enabled = document.getElementById('ctr-password-access').checked;
   document.getElementById('ctr-ssh-password').style.display = enabled ? 'block' : 'none';
+}
+
+function normalizePortCountInput(value, fallback = 5) {
+  const count = parseInt(String(value || ''), 10);
+  if (Number.isNaN(count)) return fallback;
+  return Math.max(0, Math.min(32, count));
+}
+
+function renderCreateExtraPortBindings(bindings = null) {
+  const container = document.getElementById('ctr-extra-port-bindings');
+  const countInput = document.getElementById('ctr-extra-port-count');
+  const count = normalizePortCountInput(countInput.value, 5);
+  countInput.value = String(count);
+  const current = Array.isArray(bindings) ? bindings : [...container.querySelectorAll('.port-binding-row')].map((row, index) => ({
+    host_port: '',
+    container_port: parseInt(row.querySelector('.ctr-extra-container-port').value, 10) || (8000 + index),
+    protocol: 'tcp'
+  }));
+  container.innerHTML = Array.from({ length: count }, (_, index) => {
+    const item = current[index] || {};
+    const containerPort = parseInt(item.container_port, 10) || (8000 + index);
+    return `
+      <div class="port-binding-row">
+        <input class="form-input ctr-extra-host-port" type="text" value="自动分配" readonly>
+        <input class="form-input ctr-extra-container-port" type="number" min="1" max="65535" value="${containerPort}">
+        <input class="form-input" type="text" value="tcp" readonly>
+      </div>
+    `;
+  }).join('');
+}
+
+function collectCreateRuntimeOptions() {
+  return {
+    network_mode: document.getElementById('ctr-network-mode').value,
+    ipc_mode: document.getElementById('ctr-ipc-mode').value,
+    shm_size: document.getElementById('ctr-shm-size').value.trim(),
+    ulimits: {
+      memlock: document.getElementById('ctr-ulimit-memlock').value.trim(),
+      stack: document.getElementById('ctr-ulimit-stack').value.trim(),
+      nofile: document.getElementById('ctr-ulimit-nofile').value.trim()
+    },
+    cap_add: document.getElementById('ctr-cap-sys-ptrace').checked ? ['SYS_PTRACE'] : []
+  };
+}
+
+function collectCreateExtraPortBindings() {
+  return [...document.querySelectorAll('#ctr-extra-port-bindings .port-binding-row')].map(row => ({
+    container_port: parseInt(row.querySelector('.ctr-extra-container-port').value, 10) || 0,
+    protocol: 'tcp'
+  }));
+}
+
+function toggleCreateRuntimeFields() {
+  const networkMode = document.getElementById('ctr-network-mode').value;
+  const portCountInput = document.getElementById('ctr-extra-port-count');
+  const extraPortField = document.getElementById('ctr-extra-port-bindings-field');
+  const extraPortHint = document.getElementById('ctr-extra-port-hint');
+  const sshPortInput = document.getElementById('ctr-port');
+  const hostMode = networkMode === 'host';
+  portCountInput.disabled = hostMode;
+  extraPortField.style.opacity = hostMode ? '0.6' : '1';
+  sshPortInput.disabled = hostMode;
+  if (hostMode) {
+    portCountInput.value = '0';
+    extraPortHint.textContent = 'Host 网络模式下不走自动 SSH 端口和业务端口映射；当前版本暂不支持用于 SSH 登录型容器。';
+  } else {
+    if (normalizePortCountInput(portCountInput.value, 5) === 0) {
+      portCountInput.value = '5';
+      renderCreateExtraPortBindings();
+    }
+    extraPortHint.textContent = '默认分配 5 个宿主机业务端口，宿主机端口自动分配到 32200-32999。';
+  }
 }
 
 /* ═══════════════════════════════════════════════
@@ -3954,6 +4164,9 @@ async function createContainer() {
   const serverId = document.getElementById('ctr-server').value;
   const image = getSelectedContainerImage();
   const portValue = document.getElementById('ctr-port').value.trim();
+  const runtimeOptions = collectCreateRuntimeOptions();
+  const extraPortCount = normalizePortCountInput(document.getElementById('ctr-extra-port-count').value, 5);
+  const extraPortBindings = runtimeOptions.network_mode === 'host' ? [] : collectCreateExtraPortBindings();
   const gpuEnabled = document.getElementById('ctr-gpu-enabled').checked && !document.getElementById('ctr-gpu-enabled').disabled;
   const gpuDevices = getSelectedContainerGpuDevices();
   const rootfsInput = document.getElementById('ctr-rootfs-limit');
@@ -3970,8 +4183,17 @@ async function createContainer() {
     toast('SSH 端口必须是数字，或留空自动分配', 'warn');
     return;
   }
+  if (runtimeOptions.network_mode !== 'bridge') {
+    toast('当前版本暂不支持对 SSH 登录型容器启用非 bridge 网络模式', 'warn');
+    return;
+  }
   if (gpuEnabled && !gpuDevices.length) {
     toast('已启用 GPU，请至少选择一张 GPU', 'warn');
+    return;
+  }
+  const invalidExtraPort = extraPortBindings.find(item => !item.container_port || item.container_port < 1 || item.container_port > 65535);
+  if (invalidExtraPort) {
+    toast('额外业务端口中的容器内端口无效', 'warn');
     return;
   }
   const body = {
@@ -3988,6 +4210,9 @@ async function createContainer() {
     gpu_mode:    gpuEnabled ? 'shared' : '',
     rootfs_limit: rootfsLimit,
     ssh_port:    portValue ? parseInt(portValue, 10) : null,
+    runtime_options: runtimeOptions,
+    extra_port_count: extraPortCount,
+    extra_port_bindings: extraPortBindings,
     ssh_public_key: document.getElementById('ctr-ssh-key').value,
     allow_sudo: true,
     password_access: document.getElementById('ctr-password-access').checked,
@@ -3997,7 +4222,7 @@ async function createContainer() {
   const res = await api('/api/containers', { method: 'POST', body: JSON.stringify(body) });
   if (res.ok) {
     toast(res.recovered ? '已接管已存在容器并补回记录' : '容器创建成功！', 'ok');
-    document.getElementById('ssh-cmd-text').textContent = res.ssh_cmd;
+    document.getElementById('ssh-cmd-text').textContent = res.copy_text || res.ssh_cmd || '';
     document.getElementById('ssh-result').style.display = 'block';
     loadOverview(); loadAuditLogs();
   } else {
@@ -4047,6 +4272,63 @@ function toggleEditContainerGpuFields() {
   if (enabled && options.length && !getSelectedEditContainerGpuDevices().length) {
     setAllEditContainerGpuDevices(true);
   }
+}
+
+function renderEditExtraPortBindings(bindings = null) {
+  const container = document.getElementById('edit-ctr-extra-port-bindings');
+  const countInput = document.getElementById('edit-ctr-extra-port-count');
+  const count = normalizePortCountInput(countInput.value, 0);
+  countInput.value = String(count);
+  const current = Array.isArray(bindings) ? bindings : [...container.querySelectorAll('.port-binding-row')].map((row, index) => ({
+    host_port: row.querySelector('.edit-ctr-extra-host-port').value === '自动分配' ? '' : row.querySelector('.edit-ctr-extra-host-port').value,
+    container_port: parseInt(row.querySelector('.edit-ctr-extra-container-port').value, 10) || (8000 + index),
+    protocol: 'tcp'
+  }));
+  container.innerHTML = Array.from({ length: count }, (_, index) => {
+    const item = current[index] || {};
+    const hostPort = item.host_port || '自动分配';
+    const containerPort = parseInt(item.container_port, 10) || (8000 + index);
+    return `
+      <div class="port-binding-row">
+        <input class="form-input edit-ctr-extra-host-port" type="text" value="${escapeHtml(hostPort)}" readonly>
+        <input class="form-input edit-ctr-extra-container-port" type="number" min="1" max="65535" value="${containerPort}">
+        <input class="form-input" type="text" value="tcp" readonly>
+      </div>
+    `;
+  }).join('');
+}
+
+function collectEditRuntimeOptions() {
+  return {
+    network_mode: document.getElementById('edit-ctr-network-mode').value,
+    ipc_mode: document.getElementById('edit-ctr-ipc-mode').value,
+    shm_size: document.getElementById('edit-ctr-shm-size').value.trim(),
+    ulimits: {
+      memlock: document.getElementById('edit-ctr-ulimit-memlock').value.trim(),
+      stack: document.getElementById('edit-ctr-ulimit-stack').value.trim(),
+      nofile: document.getElementById('edit-ctr-ulimit-nofile').value.trim()
+    },
+    cap_add: document.getElementById('edit-ctr-cap-sys-ptrace').checked ? ['SYS_PTRACE'] : []
+  };
+}
+
+function collectEditExtraPortBindings(container) {
+  const existing = Array.isArray(container.extra_port_bindings) ? container.extra_port_bindings : [];
+  return [...document.querySelectorAll('#edit-ctr-extra-port-bindings .port-binding-row')].map((row, index) => ({
+    host_port: existing[index] ? existing[index].host_port : null,
+    container_port: parseInt(row.querySelector('.edit-ctr-extra-container-port').value, 10) || 0,
+    protocol: 'tcp'
+  }));
+}
+
+function toggleEditRuntimeFields() {
+  const networkMode = document.getElementById('edit-ctr-network-mode').value;
+  const hostMode = networkMode === 'host';
+  document.getElementById('edit-ctr-extra-port-count').disabled = hostMode;
+  document.getElementById('edit-ctr-extra-port-bindings-field').style.opacity = hostMode ? '0.6' : '1';
+  document.getElementById('edit-ctr-extra-port-hint').textContent = hostMode
+    ? 'Host 网络模式下不走自动 SSH 与业务端口映射；当前版本暂不支持用于 SSH 登录型容器。'
+    : '修改端口映射后需要通过重建生效。';
 }
 
 function toggleRebuildSourceFields() {
@@ -4184,6 +4466,17 @@ async function openContainerResourceModal(id) {
   document.getElementById('edit-ctr-resource-mem').value = container.mem_limit || '1g';
   document.getElementById('edit-ctr-resource-pids').value = container.pids_limit || 512;
   document.getElementById('edit-ctr-rootfs-limit').value = container.rootfs_limit || '120g';
+  const runtimeOptions = container.runtime_options || {};
+  document.getElementById('edit-ctr-network-mode').value = runtimeOptions.network_mode || 'bridge';
+  document.getElementById('edit-ctr-ipc-mode').value = runtimeOptions.ipc_mode || 'private';
+  document.getElementById('edit-ctr-shm-size').value = runtimeOptions.shm_size || '';
+  document.getElementById('edit-ctr-ulimit-memlock').value = (runtimeOptions.ulimits && runtimeOptions.ulimits.memlock) || '';
+  document.getElementById('edit-ctr-ulimit-stack').value = (runtimeOptions.ulimits && runtimeOptions.ulimits.stack) || '';
+  document.getElementById('edit-ctr-ulimit-nofile').value = (runtimeOptions.ulimits && runtimeOptions.ulimits.nofile) || '';
+  document.getElementById('edit-ctr-cap-sys-ptrace').checked = Array.isArray(runtimeOptions.cap_add) && runtimeOptions.cap_add.includes('SYS_PTRACE');
+  document.getElementById('edit-ctr-extra-port-count').value = String((container.extra_port_bindings || []).length || 0);
+  renderEditExtraPortBindings(container.extra_port_bindings || []);
+  toggleEditRuntimeFields();
   document.getElementById('edit-ctr-gpu-enabled').checked = Boolean(container.gpu_enabled);
   document.getElementById('edit-ctr-gpu-enabled').disabled = true;
   document.getElementById('edit-ctr-gpu-hint').textContent = '读取服务器 GPU 能力中...';
@@ -4302,6 +4595,8 @@ async function rebuildContainer() {
   const imageRef = document.getElementById('edit-ctr-rebuild-image').value;
   const gpuCheckbox = document.getElementById('edit-ctr-gpu-enabled');
   const rootfsInput = document.getElementById('edit-ctr-rootfs-limit');
+  const runtimeOptions = collectEditRuntimeOptions();
+  const extraPortBindings = collectEditExtraPortBindings(container);
   const gpuEnabled = gpuCheckbox.disabled ? Boolean(container.gpu_enabled) : gpuCheckbox.checked;
   const gpuDevices = gpuCheckbox.disabled
     ? normalizeGpuDeviceIds(container.gpu_devices || [])
@@ -4320,11 +4615,19 @@ async function rebuildContainer() {
     toast('已启用 GPU，请至少选择一张 GPU', 'warn');
     return;
   }
+  if (runtimeOptions.network_mode !== 'bridge') {
+    toast('当前版本暂不支持对 SSH 登录型容器启用非 bridge 网络模式', 'warn');
+    return;
+  }
+  if (extraPortBindings.some(item => !item.container_port || item.container_port < 1 || item.container_port > 65535)) {
+    toast('额外业务端口中的容器内端口无效', 'warn');
+    return;
+  }
   if (sourceType === 'backup_image' && !imageRef) {
     toast('请选择一个手动备份镜像', 'warn');
     return;
   }
-  if (!confirm(`确认重建容器 ${container.name} 并应用 GPU / 磁盘上限变更？`)) return;
+  if (!confirm(`确认重建容器 ${container.name} 并应用运行参数 / GPU / 磁盘上限变更？`)) return;
 
   const submitBtn = document.getElementById('edit-ctr-rebuild-submit');
   submitBtn.disabled = true;
@@ -4339,6 +4642,8 @@ async function rebuildContainer() {
       gpu_devices: gpuEnabled ? gpuDevices : [],
       gpu_mode: gpuEnabled ? 'shared' : '',
       rootfs_limit: rootfsLimit,
+      runtime_options: runtimeOptions,
+      extra_port_bindings: extraPortBindings,
       source_type: sourceType,
       image_ref: sourceType === 'backup_image' ? imageRef : ''
     })
