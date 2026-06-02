@@ -1,9 +1,12 @@
 import base64
+import csv
 import hmac
+import io
 import json
 import os
 import posixpath
 import re
+import secrets
 import shlex
 import sqlite3
 import subprocess
@@ -12,14 +15,16 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
-from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for, has_request_context
+from flask import Flask, Response, jsonify, render_template_string, request, session, redirect, url_for, has_request_context
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production-please")
+APP_MODE = str(os.environ.get("APP_MODE", "panel") or "panel").strip().lower()
 admin_password_b64 = os.environ.get("ADMIN_PASSWORD_B64", "")
 admin_password = (
     base64.b64decode(admin_password_b64).decode("utf-8")
@@ -55,6 +60,8 @@ GPU_ACCOUNTING_STALE_SECONDS = 60
 GPU_ACCOUNTING_WARN_RATIO = 0.8
 GPU_ACCOUNTING_OVER_RATIO = 1.0
 GPU_ACCOUNTING_CRITICAL_RATIO = 1.2
+GPU_PORTAL_DEFAULT_DAYS = 30
+GPU_PORTAL_TOKEN_LENGTH = 16
 gpu_accounting_db_lock = threading.RLock()
 gpu_accounting_runtime_lock = threading.RLock()
 gpu_accounting_worker_lock = threading.Lock()
@@ -147,6 +154,24 @@ def ensure_gpu_accounting_defaults(data):
             "deactivated_by": str(record.get("deactivated_by") or "").strip(),
         })
     cfg["temp_quotas"] = normalized_temp_quotas
+    raw_portal_tokens = cfg.get("portal_tokens", {})
+    normalized_portal_tokens = {}
+    if isinstance(raw_portal_tokens, dict):
+        for username, record in raw_portal_tokens.items():
+            normalized_username = str(username or "").strip()
+            if not normalized_username or not isinstance(record, dict):
+                continue
+            token = str(record.get("token") or "").strip()
+            if not token:
+                continue
+            normalized_portal_tokens[normalized_username] = {
+                "token": token[:64],
+                "created_at": str(record.get("created_at") or "").strip(),
+                "created_by": str(record.get("created_by") or "").strip(),
+                "last_reset_at": str(record.get("last_reset_at") or "").strip(),
+                "last_reset_by": str(record.get("last_reset_by") or "").strip(),
+            }
+    cfg["portal_tokens"] = normalized_portal_tokens
     return cfg
 
 def load_data():
@@ -952,6 +977,44 @@ def query_gpu_accounting_weekly_by_container_for_user(week_start, week_end, user
         (iso_seconds(week_start), iso_seconds(week_end), username),
     )
 
+def query_gpu_accounting_ranking_by_user(window_start, window_end):
+    return query_gpu_accounting_rows(
+        """
+        SELECT
+            username,
+            SUM(gpu_card_hours) AS gpu_card_hours,
+            SUM(low_efficiency_card_hours) AS low_efficiency_card_hours,
+            SUM(util_percent_sum) AS util_percent_sum,
+            SUM(memory_ratio_sum) AS memory_ratio_sum,
+            MAX(peak_active_gpu_count) AS peak_active_gpu_count,
+            SUM(sample_count) AS sample_count
+        FROM gpu_accounting_minute_usage
+        WHERE bucket_start >= ? AND bucket_start < ?
+        GROUP BY username
+        ORDER BY SUM(gpu_card_hours) DESC, username
+        """,
+        (iso_seconds(window_start), iso_seconds(window_end)),
+    )
+
+def query_gpu_accounting_daily_usage_for_user(window_start, window_end, username):
+    return query_gpu_accounting_rows(
+        """
+        SELECT
+            substr(bucket_start, 1, 10) AS usage_date,
+            SUM(gpu_card_hours) AS gpu_card_hours,
+            SUM(low_efficiency_card_hours) AS low_efficiency_card_hours,
+            SUM(util_percent_sum) AS util_percent_sum,
+            SUM(memory_ratio_sum) AS memory_ratio_sum,
+            MAX(peak_active_gpu_count) AS peak_active_gpu_count,
+            SUM(sample_count) AS sample_count
+        FROM gpu_accounting_minute_usage
+        WHERE bucket_start >= ? AND bucket_start < ? AND username = ?
+        GROUP BY substr(bucket_start, 1, 10)
+        ORDER BY usage_date
+        """,
+        (iso_seconds(window_start), iso_seconds(window_end), username),
+    )
+
 def usage_hours(value):
     try:
         return round(float(value or 0.0), 4)
@@ -963,6 +1026,114 @@ def usage_percent(value):
         return round(float(value or 0.0), 2)
     except (TypeError, ValueError):
         return 0.0
+
+def clamp_day_window(value, default=GPU_PORTAL_DEFAULT_DAYS, minimum=1, maximum=365):
+    return clamp_int(value, default, minimum=minimum, maximum=maximum)
+
+def date_bucket_start(dt):
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+def daterange_days(start_dt, day_count):
+    current = date_bucket_start(start_dt)
+    for _ in range(max(0, int(day_count))):
+        yield current
+        current += timedelta(days=1)
+
+def generate_short_token(length=GPU_PORTAL_TOKEN_LENGTH):
+    token = ""
+    while len(token) < length:
+        token += secrets.token_urlsafe(length)
+        token = re.sub(r"[^A-Za-z0-9]", "", token)
+    return token[:length]
+
+def mask_portal_username(username, viewer_username):
+    normalized_username = str(username or "").strip()
+    normalized_viewer = str(viewer_username or "").strip()
+    if not normalized_username:
+        return ""
+    if normalized_username == normalized_viewer:
+        return normalized_username
+    if len(normalized_username) <= 1:
+        return "*"
+    if len(normalized_username) == 2:
+        return normalized_username[0] + "*"
+    return normalized_username[0] + ("*" * (len(normalized_username) - 2)) + normalized_username[-1]
+
+def build_gpu_accounting_portal_url(token):
+    normalized_token = str(token or "").strip()
+    if not normalized_token:
+        return ""
+    root = str(os.environ.get("GPU_PORTAL_PUBLIC_BASE_URL") or "").strip()
+    if root:
+        parsed = urlsplit(root)
+        path = (parsed.path or "").rstrip("/")
+        return urlunsplit((parsed.scheme, parsed.netloc, f"{path}/portal/{normalized_token}", "", ""))
+    if has_request_context():
+        try:
+            current = urlsplit(request.url_root)
+            hostname = current.hostname or ""
+            if hostname:
+                portal_port = clamp_int(
+                    os.environ.get("GPU_PORTAL_PORT", "5002"),
+                    5002,
+                    minimum=1,
+                    maximum=65535,
+                )
+                if ":" in hostname and not hostname.startswith("["):
+                    hostname = f"[{hostname}]"
+                netloc = f"{hostname}:{portal_port}"
+                return urlunsplit((current.scheme or "http", netloc, f"/portal/{normalized_token}", "", ""))
+        except Exception:
+            pass
+    return f"/portal/{normalized_token}"
+
+def find_gpu_portal_token_record(data, username=""):
+    cfg = ensure_gpu_accounting_defaults(data)
+    portal_tokens = cfg.setdefault("portal_tokens", {})
+    normalized_username = str(username or "").strip()
+    if normalized_username:
+        return portal_tokens.get(normalized_username)
+    return portal_tokens
+
+def ensure_gpu_portal_token(data, username, operator="", force_reset=False):
+    cfg = ensure_gpu_accounting_defaults(data)
+    portal_tokens = cfg.setdefault("portal_tokens", {})
+    normalized_username = str(username or "").strip()
+    if not normalized_username:
+        return None
+    now_text = datetime.now().isoformat(timespec="seconds")
+    current = portal_tokens.get(normalized_username) or {}
+    if current.get("token") and not force_reset:
+        return {
+            "username": normalized_username,
+            **current,
+            "url": build_gpu_accounting_portal_url(current.get("token")),
+        }
+    token = generate_short_token()
+    while any((item or {}).get("token") == token for item in portal_tokens.values()):
+        token = generate_short_token()
+    next_record = {
+        "token": token,
+        "created_at": str(current.get("created_at") or now_text).strip() or now_text,
+        "created_by": str(current.get("created_by") or operator).strip(),
+        "last_reset_at": now_text if current.get("token") else "",
+        "last_reset_by": operator if current.get("token") else "",
+    }
+    portal_tokens[normalized_username] = next_record
+    return {
+        "username": normalized_username,
+        **next_record,
+        "url": build_gpu_accounting_portal_url(token),
+    }
+
+def get_gpu_portal_user_by_token(data, token):
+    normalized_token = str(token or "").strip()
+    if not normalized_token:
+        return "", None
+    for username, record in (find_gpu_portal_token_record(data) or {}).items():
+        if str((record or {}).get("token") or "").strip() == normalized_token:
+            return str(username or "").strip(), record
+    return "", None
 
 def avg_from_sums(total, count):
     try:
@@ -1005,12 +1176,103 @@ def build_gpu_accounting_current_user_map(current_containers):
         server_entry["containers"].append(json.loads(json.dumps(entry, ensure_ascii=False)))
     return user_map
 
+def build_gpu_ranking_payload(data, rows, week_start=None):
+    current_week_start = week_start or current_week_window()[0]
+    ranking = []
+    for index, row in enumerate(rows, start=1):
+        username = str(row.get("username") or "").strip()
+        if not username:
+            continue
+        quota = current_gpu_quota_snapshot(data, username, current_week_start)
+        used_hours = usage_hours(row.get("gpu_card_hours", 0))
+        ranking.append({
+            "rank": index,
+            "username": username,
+            "base_quota_hours": quota["base_quota_hours"],
+            "user_base_quota_hours": quota["user_base_quota_hours"],
+            "temporary_extra_quota_hours": usage_hours(quota["temporary_extra_quota_hours"]),
+            "effective_quota_hours": usage_hours(quota["effective_quota_hours"]),
+            "gpu_card_hours": used_hours,
+            "low_efficiency_card_hours": usage_hours(row.get("low_efficiency_card_hours", 0)),
+            "avg_gpu_util_percent": usage_percent(avg_from_sums(row.get("util_percent_sum", 0), row.get("sample_count", 0))),
+            "avg_gpu_memory_ratio_percent": usage_percent(avg_from_sums(row.get("memory_ratio_sum", 0), row.get("sample_count", 0)) * 100.0),
+            "peak_active_gpu_count": clamp_int(row.get("peak_active_gpu_count", 0), 0, minimum=0),
+            **current_gpu_quota_status(used_hours, quota["effective_quota_hours"]),
+        })
+    ranking.sort(key=lambda item: (-item.get("gpu_card_hours", 0.0), item.get("username", "")))
+    for index, item in enumerate(ranking, start=1):
+        item["rank"] = index
+    return ranking
+
+def build_gpu_daily_usage_payload(username, rows, days, window_start):
+    daily_map = {}
+    for row in rows:
+        usage_date = str(row.get("usage_date") or "").strip()
+        if not usage_date:
+            continue
+        daily_map[usage_date] = {
+            "date": usage_date,
+            "gpu_card_hours": usage_hours(row.get("gpu_card_hours", 0)),
+            "low_efficiency_card_hours": usage_hours(row.get("low_efficiency_card_hours", 0)),
+            "avg_gpu_util_percent": usage_percent(avg_from_sums(row.get("util_percent_sum", 0), row.get("sample_count", 0))),
+            "avg_gpu_memory_ratio_percent": usage_percent(avg_from_sums(row.get("memory_ratio_sum", 0), row.get("sample_count", 0)) * 100.0),
+            "peak_active_gpu_count": clamp_int(row.get("peak_active_gpu_count", 0), 0, minimum=0),
+        }
+    series = []
+    for day in daterange_days(window_start, days):
+        key = day.date().isoformat()
+        series.append(daily_map.get(key, {
+            "date": key,
+            "gpu_card_hours": 0.0,
+            "low_efficiency_card_hours": 0.0,
+            "avg_gpu_util_percent": 0.0,
+            "avg_gpu_memory_ratio_percent": 0.0,
+            "peak_active_gpu_count": 0,
+        }))
+    return {
+        "username": username,
+        "days": days,
+        "series": series,
+    }
+
+def build_gpu_portal_me_payload(data, username, days):
+    normalized_days = clamp_day_window(days, default=GPU_PORTAL_DEFAULT_DAYS, minimum=7, maximum=365)
+    window_end = date_bucket_start(datetime.now()) + timedelta(days=1)
+    window_start = window_end - timedelta(days=normalized_days)
+    ranking_rows = query_gpu_accounting_ranking_by_user(window_start, window_end)
+    ranking = build_gpu_ranking_payload(data, ranking_rows)
+    my_row = next((item for item in ranking if item.get("username") == username), None)
+    daily_rows = query_gpu_accounting_daily_usage_for_user(window_start, window_end, username)
+    daily = build_gpu_daily_usage_payload(username, daily_rows, normalized_days, window_start)
+    quota = current_gpu_quota_snapshot(data, username, current_week_window()[0])
+    return {
+        "username": username,
+        "days": normalized_days,
+        "window_start": window_start.date().isoformat(),
+        "window_end": (window_end - timedelta(days=1)).date().isoformat(),
+        "me": my_row or {
+            "rank": None,
+            "username": username,
+            "gpu_card_hours": 0.0,
+            "low_efficiency_card_hours": 0.0,
+            "avg_gpu_util_percent": 0.0,
+            "avg_gpu_memory_ratio_percent": 0.0,
+            "peak_active_gpu_count": 0,
+            "base_quota_hours": quota["base_quota_hours"],
+            "user_base_quota_hours": quota["user_base_quota_hours"],
+            "temporary_extra_quota_hours": usage_hours(quota["temporary_extra_quota_hours"]),
+            "effective_quota_hours": usage_hours(quota["effective_quota_hours"]),
+            **current_gpu_quota_status(0.0, quota["effective_quota_hours"]),
+        },
+        "daily": daily,
+    }
+
 @app.errorhandler(Exception)
 def handle_exception(exc):
     if isinstance(exc, HTTPException):
         return exc
     app.logger.exception("Unhandled exception")
-    if request.path.startswith("/api/"):
+    if request.path.startswith("/api/") or request.path.startswith("/portal-api/"):
         return jsonify({"ok": False, "error": f"服务器内部错误: {exc}"}), 500
     return f"服务器内部错误: {exc}", 500
 
@@ -1649,6 +1911,8 @@ from functools import wraps
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if APP_MODE != "panel":
+            return ("Not Found", 404)
         if "user" not in session:
             return redirect(url_for("login"))
         return f(*args, **kwargs)
@@ -1664,14 +1928,32 @@ def role_required(*roles):
         return decorated
     return decorator
 
+def panel_mode_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if APP_MODE != "panel":
+            return ("Not Found", 404)
+        return f(*args, **kwargs)
+    return decorated
+
+def portal_mode_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if APP_MODE != "portal":
+            return ("Not Found", 404)
+        return f(*args, **kwargs)
+    return decorated
+
 # ── 路由：认证 ──────────────────────────────────────────────────────────────
 @app.route("/")
+@panel_mode_required
 def index():
     if "user" not in session:
         return redirect(url_for("login"))
     return redirect(url_for("dashboard"))
 
 @app.route("/login", methods=["GET", "POST"])
+@panel_mode_required
 def login():
     error = None
     if request.method == "POST":
@@ -1696,12 +1978,14 @@ def login():
     )
 
 @app.route("/logout")
+@panel_mode_required
 def logout():
     session.clear()
     return redirect(url_for("login"))
 
 # ── 路由：主页面（SPA 壳） ───────────────────────────────────────────────────
 @app.route("/dashboard")
+@panel_mode_required
 @login_required
 def dashboard():
     return render_template_string(
@@ -2248,6 +2532,177 @@ def api_gpu_accounting_user_detail(username):
         "last_sample_at": runtime.get("last_sample_at", ""),
         "last_success_at": runtime.get("last_success_at", ""),
         "server_errors": runtime.get("server_errors", {}),
+    })
+
+@app.route("/api/gpu-accounting/ranking", methods=["GET"])
+@login_required
+def api_gpu_accounting_ranking():
+    data = load_data()
+    days = clamp_day_window(request.args.get("days"), default=GPU_PORTAL_DEFAULT_DAYS, minimum=7, maximum=365)
+    window_end = date_bucket_start(datetime.now()) + timedelta(days=1)
+    window_start = window_end - timedelta(days=days)
+    rows = query_gpu_accounting_ranking_by_user(window_start, window_end)
+    return jsonify({
+        "ok": True,
+        "days": days,
+        "window_start": window_start.date().isoformat(),
+        "window_end": (window_end - timedelta(days=1)).date().isoformat(),
+        "retention_days": ensure_gpu_accounting_defaults(data).get("retention_days", GPU_ACCOUNTING_DEFAULT_RETENTION_DAYS),
+        "ranking": build_gpu_ranking_payload(data, rows),
+    })
+
+@app.route("/api/gpu-accounting/users/<path:username>/daily", methods=["GET"])
+@login_required
+def api_gpu_accounting_user_daily(username):
+    normalized_username = str(username or "").strip()
+    if not normalized_username:
+        return jsonify({"error": "缺少用户标识"}), 400
+    days = clamp_day_window(request.args.get("days"), default=GPU_PORTAL_DEFAULT_DAYS, minimum=7, maximum=365)
+    window_end = date_bucket_start(datetime.now()) + timedelta(days=1)
+    window_start = window_end - timedelta(days=days)
+    rows = query_gpu_accounting_daily_usage_for_user(window_start, window_end, normalized_username)
+    data = load_data()
+    return jsonify({
+        "ok": True,
+        "days": days,
+        "window_start": window_start.date().isoformat(),
+        "window_end": (window_end - timedelta(days=1)).date().isoformat(),
+        "retention_days": ensure_gpu_accounting_defaults(data).get("retention_days", GPU_ACCOUNTING_DEFAULT_RETENTION_DAYS),
+        **build_gpu_daily_usage_payload(normalized_username, rows, days, window_start),
+    })
+
+@app.route("/api/gpu-accounting/users/<path:username>/portal-token", methods=["POST"])
+@login_required
+@role_required("admin", "allocator")
+def api_gpu_accounting_portal_token(username):
+    normalized_username = str(username or "").strip()
+    if not normalized_username:
+        return jsonify({"error": "缺少用户标识"}), 400
+    with data_lock:
+        data = load_data()
+        token_info = ensure_gpu_portal_token(data, normalized_username, operator=session["user"], force_reset=False)
+        append_audit(data, f"读取 GPU 门户访问链接 {normalized_username}")
+        save_data(data)
+    return jsonify({"ok": True, "token": token_info})
+
+@app.route("/api/gpu-accounting/users/<path:username>/portal-token/reset", methods=["POST"])
+@login_required
+@role_required("admin", "allocator")
+def api_gpu_accounting_portal_token_reset(username):
+    normalized_username = str(username or "").strip()
+    if not normalized_username:
+        return jsonify({"error": "缺少用户标识"}), 400
+    with data_lock:
+        data = load_data()
+        token_info = ensure_gpu_portal_token(data, normalized_username, operator=session["user"], force_reset=True)
+        append_audit(data, f"重置 GPU 门户访问链接 {normalized_username}", "WARN")
+        save_data(data)
+    return jsonify({"ok": True, "token": token_info})
+
+@app.route("/api/gpu-accounting/portal-links/export", methods=["GET"])
+@login_required
+@role_required("admin", "allocator")
+def api_gpu_accounting_portal_links_export():
+    with data_lock:
+        data = load_data()
+        ensure_gpu_accounting_defaults(data)
+        window_end = date_bucket_start(datetime.now()) + timedelta(days=1)
+        window_start = window_end - timedelta(days=GPU_PORTAL_DEFAULT_DAYS)
+        summary_users = query_gpu_accounting_ranking_by_user(window_start, window_end)
+        usernames = sorted({
+            str(row.get("username") or "").strip()
+            for row in summary_users
+            if str(row.get("username") or "").strip()
+        } | gpu_accounting_known_usernames(data) | set((find_gpu_portal_token_record(data) or {}).keys()))
+        rows = []
+        for username in usernames:
+            token_info = ensure_gpu_portal_token(data, username, operator=session["user"], force_reset=False)
+            rows.append({
+                "username": username,
+                "token": token_info.get("token", ""),
+                "url": token_info.get("url", ""),
+                "created_at": token_info.get("created_at", ""),
+                "created_by": token_info.get("created_by", ""),
+                "last_reset_at": token_info.get("last_reset_at", ""),
+                "last_reset_by": token_info.get("last_reset_by", ""),
+            })
+        append_audit(data, f"导出 GPU 门户访问链接 CSV，共 {len(rows)} 条")
+        save_data(data)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["username", "token", "url", "created_at", "created_by", "last_reset_at", "last_reset_by"])
+    for item in rows:
+        writer.writerow([
+            item["username"],
+            item["token"],
+            item["url"],
+            item["created_at"],
+            item["created_by"],
+            item["last_reset_at"],
+            item["last_reset_by"],
+        ])
+    csv_text = buffer.getvalue()
+    response = Response(csv_text, mimetype="text/csv; charset=utf-8")
+    response.headers["Content-Disposition"] = f"attachment; filename=gpu-portal-links-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+    return response
+
+@app.route("/portal/<token>", methods=["GET"])
+@portal_mode_required
+def gpu_usage_portal(token):
+    data = load_data()
+    username, _ = get_gpu_portal_user_by_token(data, token)
+    if not username:
+        return "访问链接无效或已失效", 404
+    cfg = ensure_gpu_accounting_defaults(data)
+    return render_template_string(
+        load_template("gpu_usage_portal.html"),
+        portal_username=username,
+        portal_token=token,
+        retention_days=cfg.get("retention_days", GPU_ACCOUNTING_DEFAULT_RETENTION_DAYS),
+        panel_version=PANEL_VERSION,
+    )
+
+@app.route("/portal-api/me/<token>", methods=["GET"])
+@portal_mode_required
+def api_gpu_usage_portal_me(token):
+    data = load_data()
+    username, _ = get_gpu_portal_user_by_token(data, token)
+    if not username:
+        return jsonify({"ok": False, "error": "访问链接无效或已失效"}), 404
+    days = clamp_day_window(request.args.get("days"), default=GPU_PORTAL_DEFAULT_DAYS, minimum=7, maximum=365)
+    payload = build_gpu_portal_me_payload(data, username, days)
+    payload["ok"] = True
+    payload["retention_days"] = ensure_gpu_accounting_defaults(data).get("retention_days", GPU_ACCOUNTING_DEFAULT_RETENTION_DAYS)
+    payload["portal_url"] = build_gpu_accounting_portal_url(token)
+    return jsonify(payload)
+
+@app.route("/portal-api/ranking/<token>", methods=["GET"])
+@portal_mode_required
+def api_gpu_usage_portal_ranking(token):
+    data = load_data()
+    viewer_username, _ = get_gpu_portal_user_by_token(data, token)
+    if not viewer_username:
+        return jsonify({"ok": False, "error": "访问链接无效或已失效"}), 404
+    days = clamp_day_window(request.args.get("days"), default=GPU_PORTAL_DEFAULT_DAYS, minimum=7, maximum=365)
+    window_end = date_bucket_start(datetime.now()) + timedelta(days=1)
+    window_start = window_end - timedelta(days=days)
+    rows = query_gpu_accounting_ranking_by_user(window_start, window_end)
+    ranking = build_gpu_ranking_payload(data, rows)
+    masked_ranking = []
+    for item in ranking:
+        masked_item = dict(item)
+        masked_item["display_name"] = mask_portal_username(item.get("username", ""), viewer_username)
+        masked_item["is_self"] = item.get("username") == viewer_username
+        masked_item.pop("username", None)
+        masked_ranking.append(masked_item)
+    return jsonify({
+        "ok": True,
+        "viewer_username": viewer_username,
+        "days": days,
+        "window_start": window_start.date().isoformat(),
+        "window_end": (window_end - timedelta(days=1)).date().isoformat(),
+        "retention_days": ensure_gpu_accounting_defaults(data).get("retention_days", GPU_ACCOUNTING_DEFAULT_RETENTION_DAYS),
+        "ranking": masked_ranking,
     })
 
 @app.route("/api/gpu-accounting/settings", methods=["PATCH"])
@@ -2950,9 +3405,11 @@ def api_config_import():
         save_data(data)
     return jsonify({"ok": True, "users_ignored": users_ignored})
 
-ensure_gpu_accounting_worker_started()
+if APP_MODE == "panel":
+    ensure_gpu_accounting_worker_started()
 
 if __name__ == "__main__":
     debug = os.environ.get("DEBUG", "0") == "1"
-    port = int(os.environ.get("PANEL_PORT", "5000"))
+    default_port = "5000" if APP_MODE == "panel" else "5002"
+    port = int(os.environ.get("PANEL_PORT" if APP_MODE == "panel" else "GPU_PORTAL_PORT", default_port))
     app.run(debug=debug, host="0.0.0.0", port=port, threaded=True)

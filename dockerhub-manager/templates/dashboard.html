@@ -1227,6 +1227,37 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   font-size: 12px;
 }
 
+.gpu-daily-chart {
+  width: 100%;
+  min-height: 220px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  padding: 12px;
+}
+
+.gpu-chart-empty {
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-mid);
+  font-size: 12px;
+}
+
+.gpu-portal-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gpu-mini-spark {
+  width: 120px;
+  height: 28px;
+  display: block;
+}
+
 .modal-inline-actions {
   display: flex;
   justify-content: flex-end;
@@ -2110,12 +2141,16 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
         <div class="table-wrap">
           <div class="table-header">
             <div class="table-title">用户 GPU 计算时总表</div>
-            <input class="table-search" type="text" placeholder="搜索业务用户…" oninput="filterTable(this,'gpu-accounting-table-body')">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn" onclick="exportGpuPortalLinksCsv()">导出访问链接 CSV</button>
+              <input class="table-search" type="text" placeholder="搜索业务用户…" oninput="filterTable(this,'gpu-accounting-table-body')">
+            </div>
           </div>
           <table class="desktop-table">
             <thead>
               <tr>
                 <th>用户</th>
+                <th>最近30天</th>
                 <th>本周已用 / 有效额度</th>
                 <th>基础 / 临时额度</th>
                 <th>使用率</th>
@@ -2130,6 +2165,29 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           </table>
         </div>
         <div class="mobile-card-list" id="gpu-accounting-card-list"></div>
+
+        <div class="table-wrap" style="margin-top:18px">
+          <div class="table-header">
+            <div class="table-title">最近 30 天 GPU 排名</div>
+            <div class="gpu-summary-bar">
+              <span><strong>窗口</strong> <span id="gpu-ranking-window">最近 30 天</span></span>
+            </div>
+          </div>
+          <table class="desktop-table">
+            <thead>
+              <tr>
+                <th>排名</th>
+                <th>用户</th>
+                <th>30天 GPU卡时</th>
+                <th>低效占用</th>
+                <th>平均 GPU%</th>
+                <th>峰值活跃 GPU</th>
+              </tr>
+            </thead>
+            <tbody id="gpu-ranking-table-body"></tbody>
+          </table>
+        </div>
+        <div class="mobile-card-list" id="gpu-ranking-card-list"></div>
       </div>
     </div>
 
@@ -2492,6 +2550,16 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           <button class="btn" onclick="openGpuBaseQuotaModal(STATE.gpuAccountingActiveUser)">修改基础额度</button>
           <button class="btn btn-primary" onclick="openGpuTempQuotaModal(STATE.gpuAccountingActiveUser)">添加临时额度</button>
           <button class="btn btn-warn" onclick="resetActiveGpuTempQuotasForUser(STATE.gpuAccountingActiveUser)">重置当前临时额度</button>
+        </div>
+
+        <div class="resource-section">
+          <div class="resource-section-head">
+            <div>
+              <div class="resource-section-title">最近 30 天曲线</div>
+              <div class="resource-section-sub">按日汇总 GPU卡时，超出统计保留天数的早期日期会显示为 0。</div>
+            </div>
+          </div>
+          <div id="gpu-detail-daily-chart" class="gpu-daily-chart"></div>
         </div>
 
         <div class="resource-section">
@@ -2875,6 +2943,9 @@ const STATE = {
   containerMetricsErrors: {},
   users: [],
   gpuAccountingSummary: null,
+  gpuAccountingRanking: null,
+  gpuAccountingDailySeries: {},
+  gpuPortalLinks: {},
   gpuAccountingDetail: null,
   gpuAccountingActiveUser: '',
   gpuAccountingDetailView: 'servers',
@@ -3729,10 +3800,12 @@ function renderUserCard(user) {
 
 function renderGpuAccountingCard(user) {
   const usagePercent = Number(user.usage_ratio || 0) * 100;
+  const rankingUser = getGpuRankingUser(user.username);
   const adminActions = STATE.role === 'admin' || STATE.role === 'allocator'
     ? `
       <button class="btn" onclick="openGpuBaseQuotaModal('${escapeHtml(user.username)}')">基础额度</button>
       <button class="btn" onclick="openGpuTempQuotaModal('${escapeHtml(user.username)}')">临时额度</button>
+      <button class="btn" onclick="copyGpuPortalLink('${escapeHtml(user.username)}')">复制链接</button>
     `
     : '';
   return `<div class="mobile-card">
@@ -3751,6 +3824,10 @@ function renderGpuAccountingCard(user) {
       <div class="mobile-card-item">
         <div class="mobile-card-label">使用率 / 超额</div>
         <div class="mobile-card-value">${escapeHtml(formatPercent(usagePercent))} / ${escapeHtml(formatHours(user.over_quota_hours))}</div>
+      </div>
+      <div class="mobile-card-item">
+        <div class="mobile-card-label">最近30天</div>
+        <div class="mobile-card-value">${rankingUser ? renderSparklineSvg(((STATE.gpuAccountingDailySeries[user.username] || {}).series || [])) : '—'}</div>
       </div>
       <div class="mobile-card-item">
         <div class="mobile-card-label">当前活跃 GPU</div>
@@ -4188,6 +4265,127 @@ function findGpuAccountingUser(username) {
   return users.find(item => item.username === username) || null;
 }
 
+function getGpuRankingUser(username) {
+  const ranking = (STATE.gpuAccountingRanking && STATE.gpuAccountingRanking.ranking) || [];
+  return ranking.find(item => item.username === username) || null;
+}
+
+function renderSparklineSvg(series) {
+  const points = Array.isArray(series) ? series : [];
+  if (!points.length) {
+    return '<span class="metric-muted">—</span>';
+  }
+  const values = points.map(item => Number(item.gpu_card_hours || 0));
+  const max = Math.max(...values, 1);
+  const width = 120;
+  const height = 28;
+  const step = points.length > 1 ? width / (points.length - 1) : width;
+  const coords = values.map((value, index) => {
+    const x = Math.round(index * step * 100) / 100;
+    const y = Math.round((height - (value / max) * (height - 4) - 2) * 100) / 100;
+    return `${x},${y}`;
+  }).join(' ');
+  return `<svg class="gpu-mini-spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline points="${coords}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+  </svg>`;
+}
+
+function renderGpuDailyChart(series) {
+  const container = document.getElementById('gpu-detail-daily-chart');
+  if (!container) return;
+  const points = Array.isArray(series) ? series : [];
+  if (!points.length) {
+    container.innerHTML = '<div class="gpu-chart-empty">暂无最近 30 天曲线数据</div>';
+    return;
+  }
+  const width = 900;
+  const height = 220;
+  const padding = { top: 16, right: 16, bottom: 28, left: 46 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const values = points.map(item => Number(item.gpu_card_hours || 0));
+  const maxValue = Math.max(...values, 1);
+  const minValue = 0;
+  const step = points.length > 1 ? chartWidth / (points.length - 1) : chartWidth;
+  const coords = points.map((item, index) => {
+    const value = Number(item.gpu_card_hours || 0);
+    const x = padding.left + index * step;
+    const y = padding.top + chartHeight - ((value - minValue) / (maxValue - minValue || 1)) * chartHeight;
+    return { x, y, value, date: item.date };
+  });
+  const path = coords.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ');
+  const area = `${path} L${(padding.left + chartWidth).toFixed(2)} ${(padding.top + chartHeight).toFixed(2)} L${padding.left.toFixed(2)} ${(padding.top + chartHeight).toFixed(2)} Z`;
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map(ratio => {
+    const y = padding.top + chartHeight - chartHeight * ratio;
+    const label = (maxValue * ratio).toFixed(maxValue >= 10 ? 0 : 1);
+    return {
+      y,
+      label,
+    };
+  });
+  const xLabels = coords.filter((_, index) => index === 0 || index === coords.length - 1 || index % 5 === 0);
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="220" preserveAspectRatio="none" aria-label="GPU计算时曲线">
+      ${gridLines.map(line => `
+        <line x1="${padding.left}" y1="${line.y.toFixed(2)}" x2="${(padding.left + chartWidth).toFixed(2)}" y2="${line.y.toFixed(2)}" stroke="var(--border)" stroke-width="1"></line>
+        <text x="${padding.left - 8}" y="${(line.y + 4).toFixed(2)}" text-anchor="end" fill="var(--text-lo)" font-size="10">${escapeHtml(line.label)}</text>
+      `).join('')}
+      <path d="${area}" fill="rgba(0, 212, 255, 0.14)"></path>
+      <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+      ${coords.map(point => `
+        <circle cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="2.5" fill="var(--accent)">
+          <title>${escapeHtml(point.date)}: ${escapeHtml(formatHours(point.value))}</title>
+        </circle>
+      `).join('')}
+      ${xLabels.map(point => `
+        <text x="${point.x.toFixed(2)}" y="${height - 8}" text-anchor="middle" fill="var(--text-lo)" font-size="10">${escapeHtml(point.date.slice(5))}</text>
+      `).join('')}
+    </svg>
+  `;
+}
+
+function renderGpuRankingTable() {
+  const tbody = document.getElementById('gpu-ranking-table-body');
+  const cardList = document.getElementById('gpu-ranking-card-list');
+  const ranking = (STATE.gpuAccountingRanking && STATE.gpuAccountingRanking.ranking) || [];
+  if (!tbody) return;
+  document.getElementById('gpu-ranking-window').textContent = `最近 ${(STATE.gpuAccountingRanking && STATE.gpuAccountingRanking.days) || 30} 天`;
+  if (!ranking.length) {
+    tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">◫</div><div class="empty-title">暂无 30 天 GPU 排名数据</div></div></td></tr>';
+    if (cardList) {
+      cardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-title">暂无 30 天 GPU 排名数据</div></div></div>`;
+    }
+    return;
+  }
+  tbody.innerHTML = ranking.map(item => `
+    <tr>
+      <td class="td-mono">#${escapeHtml(String(item.rank || '—'))}</td>
+      <td class="td-hi">${escapeHtml(item.username || '—')}</td>
+      <td class="td-mono">${escapeHtml(formatHours(item.gpu_card_hours))}</td>
+      <td class="td-mono">${escapeHtml(formatHours(item.low_efficiency_card_hours))}</td>
+      <td class="td-mono">${escapeHtml(formatPercent(item.avg_gpu_util_percent || 0))}</td>
+      <td class="td-mono">${escapeHtml(String(item.peak_active_gpu_count || 0))}</td>
+    </tr>
+  `).join('');
+  if (cardList) {
+    cardList.innerHTML = ranking.map(item => `
+      <div class="mobile-card">
+        <div class="mobile-card-head">
+          <div>
+            <div class="mobile-card-title">#${escapeHtml(String(item.rank || '—'))} ${escapeHtml(item.username || '—')}</div>
+            <div class="mobile-card-subtitle">30天 ${escapeHtml(formatHours(item.gpu_card_hours))}</div>
+          </div>
+          <div>${gpuQuotaStatusBadge(item.quota_status)}</div>
+        </div>
+        <div class="mobile-card-grid">
+          <div class="mobile-card-item"><div class="mobile-card-label">低效占用</div><div class="mobile-card-value">${escapeHtml(formatHours(item.low_efficiency_card_hours))}</div></div>
+          <div class="mobile-card-item"><div class="mobile-card-label">平均 GPU%</div><div class="mobile-card-value">${escapeHtml(formatPercent(item.avg_gpu_util_percent || 0))}</div></div>
+        </div>
+      </div>
+    `).join('');
+  }
+}
+
 function renderGpuServerErrorSummary(errors) {
   const entries = Object.entries(errors || {});
   if (!entries.length) {
@@ -4205,7 +4403,7 @@ function renderGpuAccountingTable() {
   const users = summary.users || [];
   document.getElementById('badge-gpu').textContent = String((summary.stats && summary.stats.over_quota_user_count) || 0);
   if (!users.length) {
-    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state">
       <div class="empty-icon">◫</div>
       <div class="empty-title">暂无 GPU 计算时记录</div>
       <div class="empty-sub">等待后台采样累计后会在这里展示业务用户总表</div>
@@ -4217,15 +4415,10 @@ function renderGpuAccountingTable() {
   }
   tbody.innerHTML = users.map(user => {
     const usagePercent = Number(user.usage_ratio || 0) * 100;
-    const adminActions = STATE.role === 'admin' || STATE.role === 'allocator'
-      ? `
-        <button class="btn" onclick="openGpuBaseQuotaModal('${escapeHtml(user.username)}')">基础额度</button>
-        <button class="btn" onclick="openGpuTempQuotaModal('${escapeHtml(user.username)}')">临时额度</button>
-      `
-      : '';
     return `
       <tr>
         <td class="td-hi">${escapeHtml(user.username)}</td>
+        <td>${renderSparklineSvg((STATE.gpuAccountingDailySeries[user.username] && STATE.gpuAccountingDailySeries[user.username].series) || [])}</td>
         <td>
           <div class="table-cell-stack">
             <div class="table-cell-main">${escapeHtml(formatHours(user.weekly_gpu_card_hours))} / ${escapeHtml(formatHours(user.effective_quota_hours))}</div>
@@ -4245,7 +4438,12 @@ function renderGpuAccountingTable() {
         <td>${gpuQuotaStatusBadge(user.quota_status)}</td>
         <td>
           <button class="btn btn-primary" onclick="openGpuUserDetail('${escapeHtml(user.username)}')">明细</button>
-          ${adminActions}
+          ${STATE.role === 'admin' || STATE.role === 'allocator'
+            ? `<button class="btn" onclick="copyGpuPortalLink('${escapeHtml(user.username)}')">复制链接</button>
+               <button class="btn btn-warn" onclick="resetGpuPortalLink('${escapeHtml(user.username)}')">重置链接</button>
+               <button class="btn" onclick="openGpuBaseQuotaModal('${escapeHtml(user.username)}')">基础额度</button>
+               <button class="btn" onclick="openGpuTempQuotaModal('${escapeHtml(user.username)}')">临时额度</button>`
+            : ''}
         </td>
       </tr>
     `;
@@ -4278,7 +4476,101 @@ async function loadGpuAccountingSummary(silent = false) {
     return;
   }
   applyGpuAccountingSummary(data);
+  await loadGpuAccountingRanking(true);
+  await loadGpuAccountingDailySeriesForVisibleUsers();
   ensureGpuAccountingTimer();
+}
+
+async function loadGpuAccountingRanking(silent = false) {
+  const data = await api('/api/gpu-accounting/ranking?days=30');
+  if (!data.ok) {
+    if (!silent) toast(data.error || 'GPU 30 天排名读取失败', 'danger');
+    return;
+  }
+  STATE.gpuAccountingRanking = data;
+  renderGpuRankingTable();
+}
+
+async function loadGpuAccountingDailySeries(username, silent = true) {
+  const normalizedUsername = String(username || '').trim();
+  if (!normalizedUsername) return null;
+  const data = await api(`/api/gpu-accounting/users/${encodeURIComponent(normalizedUsername)}/daily?days=30`);
+  if (!data.ok) {
+    if (!silent) toast(data.error || 'GPU 30 天曲线读取失败', 'danger');
+    return null;
+  }
+  STATE.gpuAccountingDailySeries[normalizedUsername] = data;
+  return data;
+}
+
+async function loadGpuAccountingDailySeriesForVisibleUsers() {
+  const users = (STATE.gpuAccountingSummary && STATE.gpuAccountingSummary.users) || [];
+  const targets = users.map(item => item.username).filter(Boolean);
+  if (!targets.length) return;
+  await Promise.all(targets.map(username => loadGpuAccountingDailySeries(username, true)));
+  renderGpuAccountingTable();
+}
+
+async function ensureGpuPortalLink(username, { reset = false } = {}) {
+  const normalizedUsername = String(username || '').trim();
+  if (!normalizedUsername) {
+    throw new Error('缺少业务用户标识');
+  }
+  const endpoint = reset
+    ? `/api/gpu-accounting/users/${encodeURIComponent(normalizedUsername)}/portal-token/reset`
+    : `/api/gpu-accounting/users/${encodeURIComponent(normalizedUsername)}/portal-token`;
+  const res = await api(endpoint, { method: 'POST' });
+  if (!res.ok) {
+    throw new Error(res.error || (reset ? '访问链接重置失败' : '访问链接读取失败'));
+  }
+  STATE.gpuPortalLinks[normalizedUsername] = res.token || {};
+  return res.token || {};
+}
+
+async function copyGpuPortalLink(username) {
+  try {
+    const token = await ensureGpuPortalLink(username);
+    await copyText(token.url || '');
+    toast('访问链接已复制', 'ok');
+    loadAuditLogs();
+  } catch (error) {
+    toast(error.message || '访问链接复制失败', 'warn');
+  }
+}
+
+async function resetGpuPortalLink(username) {
+  if (!confirm(`确认重置 ${username} 的门户访问链接？旧链接会立即失效。`)) return;
+  try {
+    const token = await ensureGpuPortalLink(username, { reset: true });
+    await copyText(token.url || '');
+    toast('访问链接已重置并复制', 'ok');
+    loadAuditLogs();
+  } catch (error) {
+    toast(error.message || '访问链接重置失败', 'danger');
+  }
+}
+
+async function exportGpuPortalLinksCsv() {
+  try {
+    const response = await fetch('/api/gpu-accounting/portal-links/export');
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || 'CSV 导出失败');
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `gpu-portal-links-${formatFilenameTimestamp()}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    toast('访问链接 CSV 已导出', 'ok');
+    loadAuditLogs();
+  } catch (error) {
+    toast(error.message || '访问链接 CSV 导出失败', 'danger');
+  }
 }
 
 function ensureGpuAccountingTimer() {
@@ -4458,6 +4750,7 @@ function applyGpuUserDetail(detail) {
   document.getElementById('gpu-user-detail-effective').textContent = formatHours(detail.effective_quota_hours || 0, false);
   document.getElementById('gpu-user-detail-active').textContent = String(detail.current_active_gpu_count || 0);
   document.getElementById('gpu-user-detail-low').textContent = String(detail.current_low_efficiency_gpu_count || 0);
+  renderGpuDailyChart((STATE.gpuAccountingDailySeries[detail.username] && STATE.gpuAccountingDailySeries[detail.username].series) || []);
   renderGpuDetailServers(detail);
   renderGpuDetailContainers(detail);
   renderGpuTempQuotaTable(detail);
@@ -4477,7 +4770,9 @@ async function openGpuUserDetail(username) {
   }
   STATE.gpuAccountingActiveUser = normalizedUsername;
   STATE.gpuAccountingDetailView = 'servers';
+  const daily = await loadGpuAccountingDailySeries(normalizedUsername, true);
   applyGpuUserDetail(data);
+  renderGpuDailyChart((daily && daily.series) || (STATE.gpuAccountingDailySeries[normalizedUsername] && STATE.gpuAccountingDailySeries[normalizedUsername].series) || []);
   openModal('modal-gpu-user-detail');
 }
 

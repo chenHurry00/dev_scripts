@@ -138,6 +138,8 @@ bash scripts/panel_manager.sh uninstall
 协议：TCP
 端口：5000
 用途：中心管理网页
+额外可选端口：5002
+用途：GPU 计算时对外查看门户（token 访问）
 ```
 
 局域网内其他管理员电脑访问：
@@ -145,6 +147,14 @@ bash scripts/panel_manager.sh uninstall
 ```text
 http://192.168.1.20:5000
 ```
+
+如启用 GPU 用量对外门户，访问格式为：
+
+```text
+http://192.168.1.20:5002/portal/<token>
+```
+
+门户为只读页面，不提供管理操作。每个业务用户对应独立 token 链接，可在管理界面的 `GPU计算时` 页面中复制、重置或导出 CSV 链接表。
 
 只有在中心服务器本机打开浏览器时才使用 `http://localhost:5000`。
 

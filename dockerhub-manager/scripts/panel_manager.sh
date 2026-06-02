@@ -9,6 +9,7 @@ CONFIG_DIR="/etc/dockerhub-manager"
 PANEL_ENV="${CONFIG_DIR}/panel.env"
 AGENT_ENV="${CONFIG_DIR}/local-agent.env"
 PANEL_SERVICE="/etc/systemd/system/dockerhub-panel.service"
+GPU_PORTAL_SERVICE="/etc/systemd/system/dockerhub-gpu-portal.service"
 AGENT_SERVICE="/etc/systemd/system/dockerhub-agent.service"
 PANEL_USER="dockerhub-panel"
 
@@ -230,6 +231,7 @@ install_panel_files() {
   run_root install -m 0644 "$SOURCE_DIR/requirements.txt" "$PANEL_DIR/requirements.txt"
   run_root install -m 0644 "$SOURCE_DIR/templates/login.html" "$PANEL_DIR/templates/login.html"
   run_root install -m 0644 "$SOURCE_DIR/templates/dashboard.html" "$PANEL_DIR/templates/dashboard.html"
+  run_root install -m 0644 "$SOURCE_DIR/templates/gpu_usage_portal.html" "$PANEL_DIR/templates/gpu_usage_portal.html"
 
   if [[ ! -x "$PANEL_DIR/.venv/bin/python" || ! -x "$PANEL_DIR/.venv/bin/pip" ]]; then
     run_root rm -rf "$PANEL_DIR/.venv"
@@ -245,6 +247,7 @@ configure_panel_env() {
   local current_password
   local current_password_b64
   local panel_port
+  local gpu_portal_port
   local secret_key
   local admin_password
   local admin_password_b64
@@ -254,11 +257,18 @@ configure_panel_env() {
   current_secret="$(read_env_value "$PANEL_ENV" SECRET_KEY || true)"
   current_password="$(read_env_value "$PANEL_ENV" ADMIN_PASSWORD || true)"
   current_password_b64="$(read_env_value "$PANEL_ENV" ADMIN_PASSWORD_B64 || true)"
+  gpu_portal_port="$(read_env_value "$PANEL_ENV" GPU_PORTAL_PORT || true)"
 
   read -r -p "中心面板端口 [${current_port:-5000}]: " panel_port
   panel_port="${panel_port:-${current_port:-5000}}"
   if [[ ! "$panel_port" =~ ^[0-9]+$ ]] || (( panel_port < 1 || panel_port > 65535 )); then
     echo "错误：面板端口无效。"
+    exit 21
+  fi
+  read -r -p "GPU 对外门户端口 [${gpu_portal_port:-5002}]: " gpu_portal_port
+  gpu_portal_port="${gpu_portal_port:-5002}"
+  if [[ ! "$gpu_portal_port" =~ ^[0-9]+$ ]] || (( gpu_portal_port < 1 || gpu_portal_port > 65535 )); then
+    echo "错误：GPU 门户端口无效。"
     exit 21
   fi
 
@@ -290,6 +300,7 @@ configure_panel_env() {
 SECRET_KEY=${secret_key}
 ADMIN_PASSWORD_B64=${admin_password_b64}
 PANEL_PORT=${panel_port}
+GPU_PORTAL_PORT=${gpu_portal_port}
 DEBUG=0
 EOF
   run_root chmod 0600 "$PANEL_ENV"
@@ -297,6 +308,7 @@ EOF
   echo ""
   echo "中心面板配置："
   echo "  监听端口: ${panel_port}"
+  echo "  GPU 门户端口: ${gpu_portal_port}"
   echo "  管理员账号: admin"
   if [[ ! -f "$PANEL_DIR/data.json" ]]; then
     echo "  管理员密码: 已按输入值设置"
@@ -307,7 +319,9 @@ EOF
 
 write_panel_service() {
   local panel_port
+  local gpu_portal_port
   panel_port="$(read_env_value "$PANEL_ENV" PANEL_PORT || true)"
+  gpu_portal_port="$(read_env_value "$PANEL_ENV" GPU_PORTAL_PORT || true)"
   run_root tee "$PANEL_SERVICE" >/dev/null <<EOF
 [Unit]
 Description=DockerHub Manager Panel
@@ -326,19 +340,43 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+  run_root tee "$GPU_PORTAL_SERVICE" >/dev/null <<EOF
+[Unit]
+Description=DockerHub Manager GPU Portal
+After=network.target
+
+[Service]
+Type=simple
+User=${PANEL_USER}
+Group=${PANEL_USER}
+WorkingDirectory=${PANEL_DIR}
+EnvironmentFile=${PANEL_ENV}
+Environment=APP_MODE=portal
+ExecStart=${PANEL_DIR}/.venv/bin/gunicorn --bind 0.0.0.0:${gpu_portal_port:-5002} --worker-class gthread --workers 1 --threads 4 --timeout 0 app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
   run_root systemctl daemon-reload
   run_root systemctl enable dockerhub-panel
+  run_root systemctl enable dockerhub-gpu-portal
   run_root systemctl restart dockerhub-panel
+  run_root systemctl restart dockerhub-gpu-portal
 }
 
 show_panel_firewall_hint() {
   local panel_port
+  local gpu_portal_port
   panel_port="$(read_env_value "$PANEL_ENV" PANEL_PORT || true)"
+  gpu_portal_port="$(read_env_value "$PANEL_ENV" GPU_PORTAL_PORT || true)"
   echo ""
   echo "面板端口提醒："
   echo "  - 请在 1Panel、系统防火墙或云安全组中放行 TCP ${panel_port:-5000}"
   echo "  - 来源建议限制为局域网管理员网段"
   echo "  - 局域网管理员访问：http://<中心服务器IP>:${panel_port:-5000}"
+  echo "  - GPU 门户可选端口：http://<中心服务器IP>:${gpu_portal_port:-5002}/portal/<token>"
 }
 
 install_or_update_panel() {
@@ -482,14 +520,19 @@ EOF
 
 panel_status() {
   run_root systemctl status dockerhub-panel --no-pager -l
+  echo ""
+  run_root systemctl status dockerhub-gpu-portal --no-pager -l || true
 }
 
 panel_logs() {
   run_root journalctl -u dockerhub-panel -n 100 --no-pager
+  echo ""
+  run_root journalctl -u dockerhub-gpu-portal -n 100 --no-pager || true
 }
 
 panel_restart() {
   run_root systemctl restart dockerhub-panel
+  run_root systemctl restart dockerhub-gpu-portal
   echo "✓ 中心面板已重启"
   show_panel_firewall_hint
 }
@@ -535,9 +578,10 @@ agent_restart() {
 disable_panel() {
   confirm_action \
     "停止中心面板并取消开机启动" \
-    "dockerhub-panel.service" \
+    "dockerhub-panel.service、dockerhub-gpu-portal.service" \
     "管理网页将不可访问；已有数据目录和配置文件会保留。" || return 0
   run_root systemctl disable --now dockerhub-panel
+  run_root systemctl disable --now dockerhub-gpu-portal || true
   echo "✓ 中心面板已停止并取消开机启动"
   echo "  已保留数据目录: ${PANEL_DIR}"
   echo "  已保留配置文件: ${PANEL_ENV}"
@@ -604,7 +648,11 @@ uninstall_panel() {
   if [[ -f "$PANEL_SERVICE" ]]; then
     run_root systemctl disable --now dockerhub-panel || true
   fi
+  if [[ -f "$GPU_PORTAL_SERVICE" ]]; then
+    run_root systemctl disable --now dockerhub-gpu-portal || true
+  fi
   run_root rm -f "$PANEL_SERVICE"
+  run_root rm -f "$GPU_PORTAL_SERVICE"
   run_root rm -rf "$PANEL_DIR"
   run_root rm -f "$PANEL_ENV"
   run_root systemctl daemon-reload
