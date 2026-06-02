@@ -10,8 +10,11 @@ PANEL_ENV="${CONFIG_DIR}/panel.env"
 AGENT_ENV="${CONFIG_DIR}/local-agent.env"
 PANEL_SERVICE="/etc/systemd/system/dockerhub-panel.service"
 GPU_PORTAL_SERVICE="/etc/systemd/system/dockerhub-gpu-portal.service"
+DOCS_SERVICE="/etc/systemd/system/dockerhub-docs.service"
 AGENT_SERVICE="/etc/systemd/system/dockerhub-agent.service"
 PANEL_USER="dockerhub-panel"
+DOCS_SOURCE_DIR="${PANEL_DIR}/docs-site"
+DOCS_BUILD_DIR="${PANEL_DIR}/docs-site-build"
 
 if [[ "$EUID" -eq 0 ]]; then
   SUDO=()
@@ -30,6 +33,17 @@ read_env_value() {
     sed -n "s/^${key}=//p" "$file" | tail -n 1
   elif [[ -e "$file" && ${#SUDO[@]} -gt 0 ]]; then
     run_root sed -n "s/^${key}=//p" "$file" | tail -n 1
+  fi
+}
+
+ensure_panel_env_defaults() {
+  local current_docs_port
+  current_docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
+  if [[ -f "$PANEL_ENV" && -z "$current_docs_port" ]]; then
+    run_root tee -a "$PANEL_ENV" >/dev/null <<EOF
+DOCS_PORT=5003
+EOF
+    run_root chmod 0600 "$PANEL_ENV"
   fi
 }
 
@@ -229,9 +243,12 @@ install_panel_files() {
   run_root mkdir -p "$PANEL_DIR/templates" "$CONFIG_DIR"
   run_root install -m 0644 "$SOURCE_DIR/app.py" "$PANEL_DIR/app.py"
   run_root install -m 0644 "$SOURCE_DIR/requirements.txt" "$PANEL_DIR/requirements.txt"
+  run_root install -m 0644 "$SOURCE_DIR/requirements-docs.txt" "$PANEL_DIR/requirements-docs.txt"
   run_root install -m 0644 "$SOURCE_DIR/templates/login.html" "$PANEL_DIR/templates/login.html"
   run_root install -m 0644 "$SOURCE_DIR/templates/dashboard.html" "$PANEL_DIR/templates/dashboard.html"
   run_root install -m 0644 "$SOURCE_DIR/templates/gpu_usage_portal.html" "$PANEL_DIR/templates/gpu_usage_portal.html"
+  run_root rm -rf "$DOCS_SOURCE_DIR"
+  run_root cp -a "$SOURCE_DIR/docs-site" "$DOCS_SOURCE_DIR"
 
   if [[ ! -x "$PANEL_DIR/.venv/bin/python" || ! -x "$PANEL_DIR/.venv/bin/pip" ]]; then
     run_root rm -rf "$PANEL_DIR/.venv"
@@ -248,6 +265,8 @@ configure_panel_env() {
   local current_password_b64
   local panel_port
   local gpu_portal_port
+  local current_docs_port
+  local docs_port
   local secret_key
   local admin_password
   local admin_password_b64
@@ -258,6 +277,7 @@ configure_panel_env() {
   current_password="$(read_env_value "$PANEL_ENV" ADMIN_PASSWORD || true)"
   current_password_b64="$(read_env_value "$PANEL_ENV" ADMIN_PASSWORD_B64 || true)"
   gpu_portal_port="$(read_env_value "$PANEL_ENV" GPU_PORTAL_PORT || true)"
+  current_docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
 
   read -r -p "中心面板端口 [${current_port:-5000}]: " panel_port
   panel_port="${panel_port:-${current_port:-5000}}"
@@ -269,6 +289,12 @@ configure_panel_env() {
   gpu_portal_port="${gpu_portal_port:-5002}"
   if [[ ! "$gpu_portal_port" =~ ^[0-9]+$ ]] || (( gpu_portal_port < 1 || gpu_portal_port > 65535 )); then
     echo "错误：GPU 门户端口无效。"
+    exit 21
+  fi
+  read -r -p "文档站端口 [${current_docs_port:-5003}]: " docs_port
+  docs_port="${docs_port:-${current_docs_port:-5003}}"
+  if [[ ! "$docs_port" =~ ^[0-9]+$ ]] || (( docs_port < 1 || docs_port > 65535 )); then
+    echo "错误：文档站端口无效。"
     exit 21
   fi
 
@@ -301,6 +327,7 @@ SECRET_KEY=${secret_key}
 ADMIN_PASSWORD_B64=${admin_password_b64}
 PANEL_PORT=${panel_port}
 GPU_PORTAL_PORT=${gpu_portal_port}
+DOCS_PORT=${docs_port}
 DEBUG=0
 EOF
   run_root chmod 0600 "$PANEL_ENV"
@@ -309,6 +336,7 @@ EOF
   echo "中心面板配置："
   echo "  监听端口: ${panel_port}"
   echo "  GPU 门户端口: ${gpu_portal_port}"
+  echo "  文档站端口: ${docs_port}"
   echo "  管理员账号: admin"
   if [[ ! -f "$PANEL_DIR/data.json" ]]; then
     echo "  管理员密码: 已按输入值设置"
@@ -366,17 +394,74 @@ EOF
   run_root systemctl restart dockerhub-gpu-portal
 }
 
+install_docs_files() {
+  run_root install -m 0644 "$SOURCE_DIR/requirements-docs.txt" "$PANEL_DIR/requirements-docs.txt"
+  run_root rm -rf "$DOCS_SOURCE_DIR"
+  run_root cp -a "$SOURCE_DIR/docs-site" "$DOCS_SOURCE_DIR"
+}
+
+build_docs_site() {
+  if [[ ! -x "$PANEL_DIR/.venv/bin/pip" ]]; then
+    echo "错误：请先安装中心面板，再部署文档站。"
+    exit 40
+  fi
+
+  run_root "$PANEL_DIR/.venv/bin/pip" install -q -r "$PANEL_DIR/requirements-docs.txt"
+  run_root rm -rf "$DOCS_BUILD_DIR"
+  run_root "$PANEL_DIR/.venv/bin/mkdocs" build -q -f "$DOCS_SOURCE_DIR/mkdocs.yml" -d "$DOCS_BUILD_DIR"
+  run_root chown -R "$PANEL_USER:$PANEL_USER" "$DOCS_SOURCE_DIR" "$DOCS_BUILD_DIR"
+}
+
+write_docs_service() {
+  local docs_port
+  docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
+  run_root tee "$DOCS_SERVICE" >/dev/null <<EOF
+[Unit]
+Description=DockerHub Manager Docs
+After=network.target
+
+[Service]
+Type=simple
+User=${PANEL_USER}
+Group=${PANEL_USER}
+WorkingDirectory=${DOCS_BUILD_DIR}
+ExecStart=${PANEL_DIR}/.venv/bin/python -m http.server ${docs_port:-5003} --directory ${DOCS_BUILD_DIR}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  run_root systemctl daemon-reload
+  run_root systemctl enable dockerhub-docs
+  run_root systemctl restart dockerhub-docs
+}
+
 show_panel_firewall_hint() {
   local panel_port
   local gpu_portal_port
+  local docs_port
   panel_port="$(read_env_value "$PANEL_ENV" PANEL_PORT || true)"
   gpu_portal_port="$(read_env_value "$PANEL_ENV" GPU_PORTAL_PORT || true)"
+  docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
   echo ""
   echo "面板端口提醒："
   echo "  - 请在 1Panel、系统防火墙或云安全组中放行 TCP ${panel_port:-5000}"
   echo "  - 来源建议限制为局域网管理员网段"
   echo "  - 局域网管理员访问：http://<中心服务器IP>:${panel_port:-5000}"
   echo "  - GPU 门户可选端口：http://<中心服务器IP>:${gpu_portal_port:-5002}/portal/<token>"
+  if [[ -f "$DOCS_SERVICE" ]]; then
+    echo "  - 文档站访问：http://<中心服务器IP>:${docs_port:-5003}"
+  fi
+}
+
+show_docs_firewall_hint() {
+  local docs_port
+  docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
+  echo ""
+  echo "文档站端口提醒："
+  echo "  - 请在 1Panel、系统防火墙或云安全组中放行 TCP ${docs_port:-5003}"
+  echo "  - 文档访问地址：http://<中心服务器IP>:${docs_port:-5003}"
 }
 
 install_or_update_panel() {
@@ -398,11 +483,20 @@ install_or_update_panel() {
       configure_panel_env
     else
       echo "✓ Existing panel configuration preserved: ${PANEL_ENV}"
+      ensure_panel_env_defaults
     fi
   else
     configure_panel_env
   fi
   write_panel_service
+  if [[ -f "$DOCS_SERVICE" ]]; then
+    echo ""
+    echo "检测到已部署文档站，同步最新文档..."
+    install_docs_files
+    build_docs_site
+    write_docs_service
+    echo "✓ 文档站已同步更新"
+  fi
   echo ""
   echo "✓ 中心面板服务已启动"
   show_panel_firewall_hint
@@ -575,6 +669,43 @@ agent_restart() {
   fi
 }
 
+install_or_update_docs() {
+  confirm_action \
+    "安装/更新文档站并注册 systemd 服务" \
+    "${DOCS_SOURCE_DIR}、${DOCS_BUILD_DIR}、dockerhub-docs.service" \
+    "会安装 MkDocs 依赖、重建静态站点并重启文档站；不会修改中心面板数据。" || return 0
+
+  if [[ ! -f "$PANEL_ENV" || ! -x "$PANEL_DIR/.venv/bin/pip" ]]; then
+    echo "错误：请先安装中心面板，再部署文档站。"
+    exit 41
+  fi
+
+  ensure_panel_env_defaults
+  ensure_panel_user
+  run_root mkdir -p "$PANEL_DIR"
+  install_docs_files
+  build_docs_site
+  write_docs_service
+
+  echo ""
+  echo "✓ 文档站服务已启动"
+  show_docs_firewall_hint
+}
+
+docs_status() {
+  run_root systemctl status dockerhub-docs --no-pager -l
+}
+
+docs_logs() {
+  run_root journalctl -u dockerhub-docs -n 100 --no-pager
+}
+
+docs_restart() {
+  run_root systemctl restart dockerhub-docs
+  echo "✓ 文档站已重启"
+  show_docs_firewall_hint
+}
+
 disable_panel() {
   confirm_action \
     "停止中心面板并取消开机启动" \
@@ -585,6 +716,17 @@ disable_panel() {
   echo "✓ 中心面板已停止并取消开机启动"
   echo "  已保留数据目录: ${PANEL_DIR}"
   echo "  已保留配置文件: ${PANEL_ENV}"
+}
+
+disable_docs() {
+  confirm_action \
+    "停止文档站并取消开机启动" \
+    "dockerhub-docs.service" \
+    "文档网页将不可访问；文档源文件和构建结果会保留。" || return 0
+  run_root systemctl disable --now dockerhub-docs
+  echo "✓ 文档站已停止并取消开机启动"
+  echo "  已保留文档源目录: ${DOCS_SOURCE_DIR}"
+  echo "  已保留构建目录: ${DOCS_BUILD_DIR}"
 }
 
 backup_panel_data() {
@@ -651,8 +793,12 @@ uninstall_panel() {
   if [[ -f "$GPU_PORTAL_SERVICE" ]]; then
     run_root systemctl disable --now dockerhub-gpu-portal || true
   fi
+  if [[ -f "$DOCS_SERVICE" ]]; then
+    run_root systemctl disable --now dockerhub-docs || true
+  fi
   run_root rm -f "$PANEL_SERVICE"
   run_root rm -f "$GPU_PORTAL_SERVICE"
+  run_root rm -f "$DOCS_SERVICE"
   run_root rm -rf "$PANEL_DIR"
   run_root rm -f "$PANEL_ENV"
   run_root systemctl daemon-reload
@@ -665,6 +811,23 @@ uninstall_panel() {
   else
     echo "  本机 Agent 未卸载。"
   fi
+}
+
+uninstall_docs() {
+  confirm_action \
+    "卸载文档站" \
+    "dockerhub-docs.service、${DOCS_SOURCE_DIR}、${DOCS_BUILD_DIR}" \
+    "会删除已部署的文档站程序文件和静态页面，但不会影响中心面板数据。" || return 0
+
+  if [[ -f "$DOCS_SERVICE" ]]; then
+    run_root systemctl disable --now dockerhub-docs || true
+  fi
+  run_root rm -f "$DOCS_SERVICE"
+  run_root rm -rf "$DOCS_SOURCE_DIR"
+  run_root rm -rf "$DOCS_BUILD_DIR"
+  run_root rm -f "$PANEL_DIR/requirements-docs.txt"
+  run_root systemctl daemon-reload
+  echo "✓ 文档站已卸载"
 }
 
 show_menu() {
@@ -688,6 +851,14 @@ show_menu() {
  10. 查看本机 Agent 日志
  11. 卸载本机 Agent
 
+【文档站】
+ 12. 安装/更新文档站
+ 13. 重启文档站
+ 14. 查看文档站状态
+ 15. 查看文档站日志
+ 16. 停止文档站并取消开机启动（保留数据）
+ 17. 卸载文档站
+
   0. 退出
 EOF
 }
@@ -696,7 +867,7 @@ run_menu() {
   local choice
   while true; do
     show_menu
-    read -r -p "请选择 [0-11]: " choice
+    read -r -p "请选择 [0-17]: " choice
     case "$choice" in
       1) install_or_update_panel ;;
       2) panel_restart ;;
@@ -709,6 +880,12 @@ run_menu() {
       9) agent_status ;;
       10) agent_logs ;;
       11) uninstall_local_agent ;;
+      12) install_or_update_docs ;;
+      13) docs_restart ;;
+      14) docs_status ;;
+      15) docs_logs ;;
+      16) disable_docs ;;
+      17) uninstall_docs ;;
       0) exit 0 ;;
       *) echo "无效选项: ${choice}" ;;
     esac
@@ -729,8 +906,14 @@ case "${1:-menu}" in
   agent-status) agent_status ;;
   agent-logs) agent_logs ;;
   uninstall-local-agent) uninstall_local_agent ;;
+  install-docs|update-docs) install_or_update_docs ;;
+  docs-restart) docs_restart ;;
+  docs-status) docs_status ;;
+  docs-logs) docs_logs ;;
+  disable-docs) disable_docs ;;
+  uninstall-docs) uninstall_docs ;;
   *)
-    echo "用法: bash scripts/panel_manager.sh [menu|install|update|restart|status|logs|disable|uninstall|install-local-agent|agent-restart|agent-status|agent-logs|uninstall-local-agent]"
+    echo "用法: bash scripts/panel_manager.sh [menu|install|update|restart|status|logs|disable|uninstall|install-local-agent|agent-restart|agent-status|agent-logs|uninstall-local-agent|install-docs|update-docs|docs-restart|docs-status|docs-logs|disable-docs|uninstall-docs]"
     exit 1
     ;;
 esac

@@ -107,7 +107,79 @@ bash scripts/panel_manager.sh install-local-agent
 bash scripts/panel_manager.sh agent-status
 bash scripts/panel_manager.sh agent-logs
 bash scripts/panel_manager.sh uninstall-local-agent
+bash scripts/panel_manager.sh install-docs
+bash scripts/panel_manager.sh docs-status
+bash scripts/panel_manager.sh docs-logs
+bash scripts/panel_manager.sh docs-restart
+bash scripts/panel_manager.sh disable-docs
+bash scripts/panel_manager.sh uninstall-docs
 ```
+
+### 部署正式文档站
+
+正式文档站与研发资料区分离：
+
+```text
+docs/       -> 研发方案、实施记录
+docs-site/  -> 对外展示的正式文档源
+```
+
+文档站使用：
+
+```text
+MkDocs + Material for MkDocs
+```
+
+部署命令：
+
+```bash
+bash scripts/panel_manager.sh install-docs
+```
+
+该命令会：
+
+```text
+复用中心面板虚拟环境安装文档依赖
+复制 docs-site/ 到 /opt/.dockerhub-panel/docs-site
+执行 mkdocs build 生成静态站点
+注册 dockerhub-docs.service
+监听 5003 端口提供文档访问
+```
+
+菜单模式下也可以选择：
+
+```text
+12. 安装/更新文档站
+13. 重启文档站
+14. 查看文档站状态
+15. 查看文档站日志
+16. 停止文档站并取消开机启动（保留数据）
+17. 卸载文档站
+```
+
+文档站默认访问地址：
+
+```text
+http://<中心服务器IP>:5003
+```
+
+文档站当前内容包括：
+
+```text
+首页
+分配员手册
+用户手册
+GPU 用量说明
+FAQ
+```
+
+如果已经安装了文档站，后续执行：
+
+```bash
+bash scripts/panel_manager.sh update
+```
+
+会同时同步最新 `docs-site/` 内容并重建静态页面。
 
 ### 卸载中心面板
 
@@ -140,6 +212,8 @@ bash scripts/panel_manager.sh uninstall
 用途：中心管理网页
 额外可选端口：5002
 用途：GPU 计算时对外查看门户（token 访问）
+额外可选端口：5003
+用途：正式文档站
 ```
 
 局域网内其他管理员电脑访问：
@@ -152,6 +226,12 @@ http://192.168.1.20:5000
 
 ```text
 http://192.168.1.20:5002/portal/<token>
+```
+
+如启用正式文档站，访问格式为：
+
+```text
+http://192.168.1.20:5003
 ```
 
 门户为只读页面，不提供管理操作。每个业务用户对应独立 token 链接，可在管理界面的 `GPU计算时` 页面中复制、重置或导出 CSV 链接表。
