@@ -1178,6 +1178,13 @@ def build_gpu_accounting_current_user_map(current_containers):
 
 def build_gpu_ranking_payload(data, rows, week_start=None):
     current_week_start = week_start or current_week_window()[0]
+    current_week_end = current_week_start + timedelta(days=7)
+    weekly_rows = query_gpu_accounting_weekly_by_user(current_week_start, current_week_end)
+    weekly_map = {
+        str(row.get("username") or "").strip(): row
+        for row in weekly_rows
+        if str(row.get("username") or "").strip()
+    }
     ranking = []
     for index, row in enumerate(rows, start=1):
         username = str(row.get("username") or "").strip()
@@ -1185,6 +1192,9 @@ def build_gpu_ranking_payload(data, rows, week_start=None):
             continue
         quota = current_gpu_quota_snapshot(data, username, current_week_start)
         used_hours = usage_hours(row.get("gpu_card_hours", 0))
+        weekly_row = weekly_map.get(username, {})
+        weekly_used_hours = usage_hours(weekly_row.get("gpu_card_hours", 0))
+        weekly_quota_status = current_gpu_quota_status(weekly_used_hours, quota["effective_quota_hours"])
         ranking.append({
             "rank": index,
             "username": username,
@@ -1197,7 +1207,12 @@ def build_gpu_ranking_payload(data, rows, week_start=None):
             "avg_gpu_util_percent": usage_percent(avg_from_sums(row.get("util_percent_sum", 0), row.get("sample_count", 0))),
             "avg_gpu_memory_ratio_percent": usage_percent(avg_from_sums(row.get("memory_ratio_sum", 0), row.get("sample_count", 0)) * 100.0),
             "peak_active_gpu_count": clamp_int(row.get("peak_active_gpu_count", 0), 0, minimum=0),
-            **current_gpu_quota_status(used_hours, quota["effective_quota_hours"]),
+            "weekly_gpu_card_hours": weekly_used_hours,
+            "weekly_over_quota_hours": usage_hours(weekly_quota_status["over_quota_hours"]),
+            "weekly_usage_ratio": weekly_quota_status["usage_ratio"],
+            "quota_status": weekly_quota_status["quota_status"],
+            "usage_ratio": weekly_quota_status["usage_ratio"],
+            "over_quota_hours": usage_hours(weekly_quota_status["over_quota_hours"]),
         })
     ranking.sort(key=lambda item: (-item.get("gpu_card_hours", 0.0), item.get("username", "")))
     for index, item in enumerate(ranking, start=1):
