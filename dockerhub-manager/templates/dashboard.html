@@ -1410,6 +1410,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
 
 .log-line {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   animation: logFade 0.3s ease;
 }
@@ -1420,6 +1421,13 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
 }
 
 .log-time { color: var(--text-lo); flex-shrink: 0; }
+.log-operator {
+  color: var(--accent-dim);
+  flex-shrink: 0;
+}
+.log-operator-role {
+  color: var(--text-lo);
+}
 .log-msg.ok     { color: var(--ok); }
 .log-msg.warn   { color: var(--warn); }
 .log-msg.danger { color: var(--danger); }
@@ -1766,9 +1774,9 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
       </div>
     </div>
 
-    <div class="nav-section" id="admin-section">
+    <div class="nav-section">
       <div class="nav-section-label">管理</div>
-      <div class="nav-item" data-panel="users" onclick="switchPanel('users', this)">
+      <div class="nav-item admin-only" data-panel="users" onclick="switchPanel('users', this)">
         <span class="nav-icon">◉</span>
         <span>用户管理</span>
         <span class="nav-badge" id="badge-usr">0</span>
@@ -1821,7 +1829,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <div class="stat-sub">活跃环境</div>
             <div class="stat-icon">⬡</div>
           </div>
-          <div class="stat-card c-purple">
+          <div class="stat-card c-purple admin-only">
             <div class="stat-label">平台用户</div>
             <div class="stat-value" id="ov-usr">—</div>
             <div class="stat-sub">管理人员</div>
@@ -2133,9 +2141,6 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           <div class="page-title">平台用户</div>
         </div>
         <div class="page-actions">
-          <button class="btn" onclick="exportConfig(false, this)">导出配置</button>
-          <button class="btn" onclick="exportConfig(true, this)">导出完整配置</button>
-          <button class="btn" onclick="openConfigImportModal()">导入配置</button>
           <button class="btn btn-primary" onclick="openModal('modal-add-usr')">+ 添加用户</button>
         </div>
       </div>
@@ -2157,19 +2162,6 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           </table>
         </div>
         <div class="mobile-card-list" id="usr-card-list"></div>
-        <div class="table-wrap" style="margin-top:18px">
-          <div class="table-header">
-            <div class="table-title">配置备份与恢复</div>
-          </div>
-          <div style="padding:16px">
-            <div class="form-hint" style="margin-top:0">
-              普通导出不包含 Agent Token，适合日常留档。完整导出包含 Agent Token，适合在面板迁移或故障恢复时重新接管原有服务器。
-            </div>
-            <div class="form-hint">
-              导入配置会覆盖当前面板中的用户、服务器、容器记录、模板和审计日志。导入前建议先导出当前配置。
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -2180,6 +2172,11 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           <div class="page-breadcrumb">DockerHub / <span>操作日志</span></div>
           <div class="page-title">审计日志</div>
         </div>
+        <div class="page-actions">
+          <button class="btn" onclick="exportConfig(false, this)">导出配置</button>
+          <button class="btn" onclick="exportConfig(true, this)">导出完整配置</button>
+          <button class="btn" onclick="openConfigImportModal()">导入配置</button>
+        </div>
       </div>
       <div class="content-area">
         <div class="log-panel">
@@ -2187,6 +2184,19 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <div class="log-indicator"><div class="dot"></div><span>系统日志</span></div>
           </div>
           <div class="log-body" id="audit-log-body" style="height:400px"></div>
+        </div>
+        <div class="table-wrap" style="margin-top:18px">
+          <div class="table-header">
+            <div class="table-title">配置备份与恢复</div>
+          </div>
+          <div style="padding:16px">
+            <div class="form-hint" style="margin-top:0">
+              普通导出不包含 Agent Token，适合日常留档。完整导出包含 Agent Token，适合在面板迁移或故障恢复时重新接管原有服务器。
+            </div>
+            <div class="form-hint">
+              admin 导入导出会包含平台用户；allocator 导入导出只处理服务器、容器、GPU 统计和操作日志，不会导出或覆盖用户数据。
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -2925,17 +2935,15 @@ updateClock();
   const roleLabels = { admin: 'ADMIN', allocator: 'ALLOCATOR' };
   document.getElementById('user-role').textContent = roleLabels[STATE.role] || STATE.role.toUpperCase();
 
+  const canManageUsers = STATE.role === 'admin';
   if (STATE.role !== 'admin') {
-    const s = document.getElementById('admin-section');
-    if (s) s.style.display = 'none';
-    const gpuActions = document.getElementById('gpu-settings-actions');
-    if (gpuActions) gpuActions.style.display = 'none';
-    const gpuDetailActions = document.getElementById('gpu-user-detail-actions');
-    if (gpuDetailActions) gpuDetailActions.style.display = 'none';
-    const quotaInput = document.getElementById('gpu-default-weekly-quota');
-    const retentionInput = document.getElementById('gpu-retention-days');
-    if (quotaInput) quotaInput.disabled = true;
-    if (retentionInput) retentionInput.disabled = true;
+    document.querySelectorAll('.admin-only').forEach(node => {
+      node.style.display = 'none';
+    });
+  }
+  if (!canManageUsers) {
+    const userPanel = document.getElementById('panel-users');
+    if (userPanel) userPanel.style.display = 'none';
   }
 })();
 
@@ -3721,7 +3729,7 @@ function renderUserCard(user) {
 
 function renderGpuAccountingCard(user) {
   const usagePercent = Number(user.usage_ratio || 0) * 100;
-  const adminActions = STATE.role === 'admin'
+  const adminActions = STATE.role === 'admin' || STATE.role === 'allocator'
     ? `
       <button class="btn" onclick="openGpuBaseQuotaModal('${escapeHtml(user.username)}')">基础额度</button>
       <button class="btn" onclick="openGpuTempQuotaModal('${escapeHtml(user.username)}')">临时额度</button>
@@ -4209,7 +4217,7 @@ function renderGpuAccountingTable() {
   }
   tbody.innerHTML = users.map(user => {
     const usagePercent = Number(user.usage_ratio || 0) * 100;
-    const adminActions = STATE.role === 'admin'
+    const adminActions = STATE.role === 'admin' || STATE.role === 'allocator'
       ? `
         <button class="btn" onclick="openGpuBaseQuotaModal('${escapeHtml(user.username)}')">基础额度</button>
         <button class="btn" onclick="openGpuTempQuotaModal('${escapeHtml(user.username)}')">临时额度</button>
@@ -4283,7 +4291,7 @@ function ensureGpuAccountingTimer() {
 }
 
 async function saveGpuAccountingSettings() {
-  if (STATE.role !== 'admin') return;
+  if (STATE.role !== 'admin' && STATE.role !== 'allocator') return;
   const quota = parseInt(document.getElementById('gpu-default-weekly-quota').value, 10);
   const retention = parseInt(document.getElementById('gpu-retention-days').value, 10);
   if (Number.isNaN(quota) || quota <= 0) {
@@ -4433,7 +4441,7 @@ function renderGpuTempQuotaTable(detail) {
       <td>${renderTempQuotaStatus(item)}</td>
       <td class="quota-table-note">${escapeHtml(item.note || '—')}${item.deactivated_at ? `<br>重置：${escapeHtml(item.deactivated_by || '—')} / ${escapeHtml(formatDateTimeText(item.deactivated_at))}` : ''}</td>
       <td class="quota-table-note">${escapeHtml(item.created_by || '—')} / ${escapeHtml(formatDateTimeText(item.created_at))}</td>
-      <td>${STATE.role === 'admin'
+      <td>${STATE.role === 'admin' || STATE.role === 'allocator'
         ? `${item.active ? `<button class="btn btn-warn" onclick="resetGpuTempQuota('${escapeHtml(item.id)}', '${escapeHtml(detail.username)}')">重置为 0</button>` : ''} <button class="btn btn-danger" onclick="deleteGpuTempQuota('${escapeHtml(item.id)}', '${escapeHtml(detail.username)}')">删除</button>`
         : '<span class="quota-table-note">只读</span>'}</td>
     </tr>
@@ -4474,7 +4482,7 @@ async function openGpuUserDetail(username) {
 }
 
 function openGpuBaseQuotaModal(username) {
-  if (STATE.role !== 'admin') return;
+  if (STATE.role !== 'admin' && STATE.role !== 'allocator') return;
   const normalizedUsername = String(username || STATE.gpuAccountingActiveUser || '').trim();
   if (!normalizedUsername) {
     toast('缺少业务用户标识', 'warn');
@@ -4521,7 +4529,7 @@ async function saveGpuBaseQuota() {
 }
 
 function openGpuTempQuotaModal(username) {
-  if (STATE.role !== 'admin') return;
+  if (STATE.role !== 'admin' && STATE.role !== 'allocator') return;
   const normalizedUsername = String(username || STATE.gpuAccountingActiveUser || '').trim();
   if (!normalizedUsername) {
     toast('缺少业务用户标识', 'warn');
@@ -4575,7 +4583,7 @@ async function saveGpuTempQuota() {
 }
 
 async function deleteGpuTempQuota(quotaId, username) {
-  if (STATE.role !== 'admin') return;
+  if (STATE.role !== 'admin' && STATE.role !== 'allocator') return;
   if (!confirm('确认删除这条临时额度记录？')) return;
   const res = await api(`/api/gpu-accounting/temp-quotas/${encodeURIComponent(quotaId)}`, {
     method: 'DELETE'
@@ -4593,7 +4601,7 @@ async function deleteGpuTempQuota(quotaId, username) {
 }
 
 async function resetGpuTempQuota(quotaId, username) {
-  if (STATE.role !== 'admin') return;
+  if (STATE.role !== 'admin' && STATE.role !== 'allocator') return;
   if (!confirm('确认立即重置这条临时额度，使其后续有效期内不再继续生效？')) return;
   const res = await api(`/api/gpu-accounting/temp-quotas/${encodeURIComponent(quotaId)}/reset`, {
     method: 'POST'
@@ -4611,7 +4619,7 @@ async function resetGpuTempQuota(quotaId, username) {
 }
 
 async function resetActiveGpuTempQuotasForUser(username) {
-  if (STATE.role !== 'admin') return;
+  if (STATE.role !== 'admin' && STATE.role !== 'allocator') return;
   const normalizedUsername = String(username || '').trim();
   if (!normalizedUsername) {
     toast('缺少业务用户标识', 'warn');
@@ -5452,7 +5460,8 @@ async function exportConfig(includeTokens, button) {
       ? `dockerhub-manager-config-full-${formatFilenameTimestamp()}.json`
       : `dockerhub-manager-config-${formatFilenameTimestamp()}.json`;
     downloadJsonFile(data, filename);
-    toast(includeTokens ? '完整配置已导出' : '配置已导出', 'ok');
+    const scopeText = includeTokens ? '完整配置已导出' : '配置已导出';
+    toast(data.contains_users === false ? `${scopeText}（不含用户）` : scopeText, 'ok');
     loadAuditLogs();
   } catch (error) {
     toast(error.message || '配置导出失败', 'danger');
@@ -5496,7 +5505,7 @@ async function importConfig() {
       throw new Error(res.error || '配置导入失败');
     }
     closeModal('modal-import-config');
-    toast('配置已导入', 'ok');
+    toast(res.users_ignored ? '配置已导入（已忽略用户数据）' : '配置已导入', res.users_ignored ? 'warn' : 'ok');
     await loadOverview();
     await loadServers();
     await loadContainers();
@@ -5565,9 +5574,11 @@ async function loadAuditLogs() {
     }
     logs.forEach(d => {
       const type = d.level === 'WARN' ? 'warn' : d.level === 'ERR' ? 'danger' : 'info';
+      const operator = escapeHtml(d.operator || '未知');
+      const operatorRole = escapeHtml(d.operator_role || '—');
       const line = document.createElement('div');
       line.className = 'log-line';
-      line.innerHTML = `<span class="log-time">${escapeHtml((d.time || '').slice(11, 19))}</span><span class="log-msg ${type}">[${escapeHtml(d.level)}] ${escapeHtml(d.message)}</span>`;
+      line.innerHTML = `<span class="log-time">${escapeHtml((d.time || '').slice(11, 19))}</span><span class="log-operator">${operator}<span class="log-operator-role">/${operatorRole}</span></span><span class="log-msg ${type}">[${escapeHtml(d.level)}] ${escapeHtml(d.message)}</span>`;
       body.appendChild(line);
     });
     body.scrollTop = body.scrollHeight;

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for
+from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for, has_request_context
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -186,6 +186,29 @@ def trim_audit_logs(data):
     data.setdefault("audit_logs", [])
     data["audit_logs"] = data["audit_logs"][-AUDIT_LOG_LIMIT:]
 
+def resolve_audit_operator(operator=None, operator_role=None):
+    resolved_operator = str(operator or "").strip()
+    resolved_role = str(operator_role or "").strip()
+    if resolved_operator:
+        return resolved_operator, resolved_role
+    if has_request_context():
+        session_user = str(session.get("user") or "").strip()
+        if session_user:
+            return session_user, str(session.get("role") or "").strip()
+    return "system", "system"
+
+def normalize_audit_log_entry(entry):
+    item = dict(entry or {})
+    item["time"] = str(item.get("time") or "")
+    item["level"] = str(item.get("level") or "INFO")
+    item["message"] = str(item.get("message") or "")
+    item["operator"] = str(item.get("operator") or "")
+    item["operator_role"] = str(item.get("operator_role") or "")
+    return item
+
+def can_manage_users():
+    return str(session.get("role") or "").strip() == "admin"
+
 def migrate_empty_server_id(data):
     """迁移旧版允许保存的空服务器 ID，避免前端下拉框与未选择状态冲突。"""
     if "" not in data["servers"]:
@@ -210,11 +233,14 @@ def migrate_empty_server_id(data):
     trim_audit_logs(data)
     save_data(data)
 
-def append_audit(data, message, level="INFO"):
+def append_audit(data, message, level="INFO", operator=None, operator_role=None):
+    resolved_operator, resolved_role = resolve_audit_operator(operator, operator_role)
     data.setdefault("audit_logs", []).append({
         "time": datetime.now().isoformat(timespec="seconds"),
         "level": level,
         "message": message,
+        "operator": resolved_operator,
+        "operator_role": resolved_role,
     })
     trim_audit_logs(data)
 
@@ -1024,7 +1050,7 @@ def append_image_pull_progress(task_id, message):
         task["progress"].append(message)
         task["progress"] = task["progress"][-100:]
 
-def run_image_pull_task(task_id, server, image):
+def run_image_pull_task(task_id, server, image, operator="system", operator_role="system"):
     host = server.get("host", "")
     port = server.get("agent_port", 5001)
     token = server.get("agent_token", "")
@@ -1062,7 +1088,13 @@ def run_image_pull_task(task_id, server, image):
     with image_pull_tasks_lock:
         task = image_pull_tasks.get(task_id, {})
         status = task.get("status", "error")
-    append_audit(data, f"镜像拉取{('完成' if status == 'done' else '失败')} {image}", "INFO" if status == "done" else "WARN")
+    append_audit(
+        data,
+        f"镜像拉取{('完成' if status == 'done' else '失败')} {image}",
+        "INFO" if status == "done" else "WARN",
+        operator=operator,
+        operator_role=operator_role,
+    )
     save_data(data)
 
 def safe_container_name(value, default="docker-env"):
@@ -1705,7 +1737,7 @@ def api_servers():
 
 @app.route("/api/servers", methods=["POST"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_add_server():
     body = request.json or {}
     sid = (body.get("id") or "").strip() or f"srv_{int(time.time())}"
@@ -1732,7 +1764,7 @@ def api_add_server():
 
 @app.route("/api/servers/<sid>", methods=["PATCH"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_update_server(sid):
     body = request.json or {}
     with data_lock:
@@ -1791,7 +1823,7 @@ def api_server_gpu(sid):
 
 @app.route("/api/servers/<sid>", methods=["DELETE"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_del_server(sid):
     with data_lock:
         data = load_data()
@@ -1872,7 +1904,11 @@ def api_pull_image():
         data = load_data()
         append_audit(data, f"开始拉取镜像 {image}，服务器 {server_id}")
         save_data(data)
-    threading.Thread(target=run_image_pull_task, args=(task_id, dict(server), image), daemon=True).start()
+    threading.Thread(
+        target=run_image_pull_task,
+        args=(task_id, dict(server), image, session["user"], session["role"]),
+        daemon=True,
+    ).start()
     return jsonify({"ok": True, "task": task})
 
 @app.route("/api/images/tasks", methods=["GET"])
@@ -2216,7 +2252,7 @@ def api_gpu_accounting_user_detail(username):
 
 @app.route("/api/gpu-accounting/settings", methods=["PATCH"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_gpu_accounting_settings():
     body = request.json or {}
     with data_lock:
@@ -2248,7 +2284,7 @@ def api_gpu_accounting_settings():
 
 @app.route("/api/gpu-accounting/users/<path:username>/base-quota", methods=["PATCH"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_gpu_accounting_set_base_quota(username):
     username = str(username or "").strip()
     if not username:
@@ -2283,7 +2319,7 @@ def api_gpu_accounting_set_base_quota(username):
 
 @app.route("/api/gpu-accounting/users/<path:username>/temp-quotas", methods=["POST"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_gpu_accounting_add_temp_quota(username):
     username = str(username or "").strip()
     if not username:
@@ -2320,7 +2356,7 @@ def api_gpu_accounting_add_temp_quota(username):
 
 @app.route("/api/gpu-accounting/temp-quotas/<quota_id>", methods=["DELETE"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_gpu_accounting_delete_temp_quota(quota_id):
     quota_id = str(quota_id or "").strip()
     if not quota_id:
@@ -2348,7 +2384,7 @@ def api_gpu_accounting_delete_temp_quota(quota_id):
 
 @app.route("/api/gpu-accounting/temp-quotas/<quota_id>/reset", methods=["POST"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_gpu_accounting_reset_temp_quota(quota_id):
     quota_id = str(quota_id or "").strip()
     if not quota_id:
@@ -2380,7 +2416,7 @@ def api_gpu_accounting_reset_temp_quota(quota_id):
 
 @app.route("/api/gpu-accounting/users/<path:username>/temp-quotas/reset", methods=["POST"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_gpu_accounting_reset_user_temp_quotas(username):
     username = str(username or "").strip()
     if not username:
@@ -2847,7 +2883,11 @@ def api_del_user(uname):
 @login_required
 def api_logs():
     data = load_data()
-    return jsonify({"logs": data.get("audit_logs", [])[-AUDIT_LOG_LIMIT:]})
+    logs = [
+        normalize_audit_log_entry(item)
+        for item in data.get("audit_logs", [])[-AUDIT_LOG_LIMIT:]
+    ]
+    return jsonify({"logs": logs})
 
 # ── 当前用户信息 ───────────────────────────────────────────────────────────
 @app.route("/api/me")
@@ -2857,23 +2897,28 @@ def api_me():
 
 @app.route("/api/config/export")
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_config_export():
     include_tokens = request.args.get("include_tokens") == "1"
+    include_users = can_manage_users()
     with data_lock:
         data = load_data()
-        append_audit(data, f"导出{'完整' if include_tokens else '普通'}配置", "WARN" if include_tokens else "INFO")
+        export_scope = "完整" if include_tokens else "普通"
+        if not include_users:
+            export_scope += "（不含用户）"
+        append_audit(data, f"导出{export_scope}配置", "WARN" if include_tokens else "INFO")
         save_data(data)
     payload = {
         "version": 1,
         "exported_at": datetime.now().isoformat(),
-        "users": data.get("users", {}),
+        "users": data.get("users", {}) if include_users else {},
         "servers": json.loads(json.dumps(data.get("servers", {}))),
         "containers": data.get("containers", {}),
         "templates": data.get("templates", []),
         "audit_logs": data.get("audit_logs", []),
         "gpu_accounting": data.get("gpu_accounting", {}),
         "contains_tokens": include_tokens,
+        "contains_users": include_users,
     }
     if not include_tokens:
         for server in payload["servers"].values():
@@ -2882,20 +2927,28 @@ def api_config_export():
 
 @app.route("/api/config/import", methods=["POST"])
 @login_required
-@role_required("admin")
+@role_required("admin", "allocator")
 def api_config_import():
     payload = request.json or {}
     if payload.get("version") != 1:
         return jsonify({"error": "不支持的配置版本"}), 400
+    include_users = can_manage_users()
+    users_ignored = not include_users and "users" in payload
     with data_lock:
         data = load_data()
-        for key in ("users", "servers", "containers", "templates", "audit_logs", "gpu_accounting"):
+        allowed_keys = ("servers", "containers", "templates", "audit_logs", "gpu_accounting")
+        if include_users:
+            allowed_keys = ("users",) + allowed_keys
+        for key in allowed_keys:
             if key in payload:
                 data[key] = payload[key]
         ensure_gpu_accounting_defaults(data)
-        append_audit(data, "导入配置并覆盖当前面板记录", "WARN")
+        message = "导入配置并覆盖当前面板记录"
+        if users_ignored:
+            message += "（已忽略用户数据）"
+        append_audit(data, message, "WARN")
         save_data(data)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "users_ignored": users_ignored})
 
 ensure_gpu_accounting_worker_started()
 
