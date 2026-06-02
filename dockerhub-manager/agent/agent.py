@@ -223,6 +223,59 @@ def inspect_container_details(name):
         "extra_port_bindings": extra_port_bindings,
     }, None
 
+def inspect_container_port_statuses(name, extra_port_bindings):
+    bindings = normalize_extra_port_bindings(
+        extra_port_bindings,
+        extra_port_count=len(extra_port_bindings) if isinstance(extra_port_bindings, list) else 0,
+    )
+    if not bindings:
+        return []
+    script_lines = ["ports=\"\""]
+    for binding in bindings:
+        container_port = normalize_container_port_value(binding.get("container_port"))
+        if container_port is None:
+            continue
+        script_lines.append(f"ports=\"$ports {container_port}\"")
+    script_lines.append(
+        "for port in $ports; do "
+        "if command -v ss >/dev/null 2>&1; then "
+        "if ss -lnt 2>/dev/null | awk 'NR>1 {print $4}' | grep -Eq '(^|:)'\"$port\"'$'; then echo \"$port:1\"; else echo \"$port:0\"; fi; "
+        "elif command -v netstat >/dev/null 2>&1; then "
+        "if netstat -lnt 2>/dev/null | awk 'NR>2 {print $4}' | grep -Eq '(^|:)'\"$port\"'$'; then echo \"$port:1\"; else echo \"$port:0\"; fi; "
+        "else "
+        "echo \"$port:?\"; "
+        "fi; "
+        "done"
+    )
+    code, out, _ = run(["docker", "exec", name, "/bin/sh", "-lc", " ".join(script_lines)], timeout=15)
+    listen_map = {}
+    if code == 0 and out:
+        for line in out.splitlines():
+            raw_line = str(line or "").strip()
+            if ":" not in raw_line:
+                continue
+            port_text, state_text = raw_line.split(":", 1)
+            port_value = normalize_container_port_value(port_text)
+            if port_value is None:
+                continue
+            if state_text == "1":
+                listen_map[port_value] = True
+            elif state_text == "0":
+                listen_map[port_value] = False
+            else:
+                listen_map[port_value] = None
+    statuses = []
+    for binding in bindings:
+        container_port = normalize_container_port_value(binding.get("container_port"))
+        host_port = normalize_container_port_value(binding.get("host_port"))
+        statuses.append({
+            "host_port": host_port,
+            "container_port": container_port,
+            "protocol": str(binding.get("protocol") or "tcp").lower(),
+            "listening": listen_map.get(container_port),
+        })
+    return statuses
+
 def inspect_image_details(image_ref):
     code, out, err = run(["docker", "image", "inspect", image_ref, "--format", "{{json .}}"], timeout=30)
     if code != 0:
@@ -1472,6 +1525,9 @@ def container_metrics():
             errors.append(f"{name}: {size_error}")
             size_info = {"disk_rw_bytes": 0, "disk_rootfs_bytes": 0}
         runtime_stats = running_stats.get(name, {})
+        port_statuses = []
+        if details.get("status") == "running":
+            port_statuses = inspect_container_port_statuses(name, details.get("extra_port_bindings", []))
         containers.append({
             "id": details.get("id", ""),
             "name": name,
@@ -1482,6 +1538,7 @@ def container_metrics():
             "pids_current": runtime_stats.get("pids_current"),
             "disk_rw_bytes": size_info.get("disk_rw_bytes", 0),
             "disk_rootfs_bytes": size_info.get("disk_rootfs_bytes", 0),
+            "port_statuses": port_statuses,
             "gpu": gpu_metrics.get(name, {
                 "enabled": False,
                 "driver": "",

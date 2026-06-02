@@ -689,6 +689,58 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   color: var(--danger);
 }
 
+.container-ssh-cell {
+  display: grid;
+  gap: 8px;
+}
+
+.container-ssh-command {
+  font-size: 11px;
+}
+
+.container-port-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.container-port-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg-panel);
+  color: var(--text-lo);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.container-port-badge.port-active {
+  color: var(--ok);
+  border-color: #00e5a040;
+  background: var(--ok-dim);
+}
+
+.container-port-badge.port-inactive {
+  color: var(--text-lo);
+}
+
+.container-port-badge.port-unknown {
+  color: var(--text-mid);
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.container-port-more {
+  font-size: 11px;
+  color: var(--text-lo);
+}
+
 /* ═══════════════════════════════════════════════
    BADGES / PILLS
 ═══════════════════════════════════════════════ */
@@ -1588,7 +1640,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
                 <th>分配给</th>
                 <th>服务器</th>
                 <th>镜像</th>
-                <th>SSH 命令</th>
+                <th>SSH / 映射端口</th>
                 <th>创建时间</th>
                 <th>占用</th>
                 <th>状态</th>
@@ -3222,6 +3274,52 @@ function renderContainerMetrics(container) {
   </div>`;
 }
 
+function buildPortStatusMap(metric) {
+  const map = new Map();
+  const items = metric && Array.isArray(metric.port_statuses) ? metric.port_statuses : [];
+  items.forEach(item => {
+    const hostPort = Number(item.host_port || 0);
+    const containerPort = Number(item.container_port || 0);
+    if (!hostPort || !containerPort) return;
+    map.set(`${hostPort}:${containerPort}`, item.listening);
+  });
+  return map;
+}
+
+function renderContainerPortMappings(container, metric) {
+  const bindings = Array.isArray(container.extra_port_bindings) ? container.extra_port_bindings : [];
+  if (!bindings.length) {
+    return '<span class="metric-muted">无额外端口</span>';
+  }
+  const statusMap = buildPortStatusMap(metric);
+  const visibleBindings = bindings.slice(0, 3);
+  const badges = visibleBindings.map(binding => {
+    const hostPort = binding.host_port;
+    const containerPort = binding.container_port;
+    const listening = statusMap.get(`${hostPort}:${containerPort}`);
+    let className = 'port-inactive';
+    if (listening === true) {
+      className = 'port-active';
+    } else if (listening === null || listening === undefined) {
+      className = 'port-unknown';
+    }
+    return `<span class="container-port-badge ${className}">${escapeHtml(String(hostPort || '—'))}→${escapeHtml(String(containerPort || '—'))}</span>`;
+  });
+  const remain = bindings.length - visibleBindings.length;
+  if (remain > 0) {
+    badges.push(`<span class="container-port-more">+${remain}</span>`);
+  }
+  return `<div class="container-port-list">${badges.join('')}</div>`;
+}
+
+function renderContainerConnectionCell(container) {
+  const metric = STATE.containerMetrics[container.id];
+  return `<div class="container-ssh-cell">
+    <div class="td-mono container-ssh-command">${escapeHtml(container.ssh_cmd || '—')}</div>
+    ${renderContainerPortMappings(container, metric)}
+  </div>`;
+}
+
 function renderServerCheckCell(server) {
   const checks = server.checks || {};
   const warnings = (checks.warnings || []).length;
@@ -3294,7 +3392,7 @@ function renderContainersTable() {
       <td>${c.user || '—'}</td>
       <td>${c.server || '—'}</td>
       <td class="td-mono">${c.image}</td>
-      <td class="td-mono" style="font-size:11px">${c.ssh_cmd || '—'}</td>
+      <td>${renderContainerConnectionCell(c)}</td>
       <td style="font-size:11px;color:var(--text-lo)">${c.created_at ? c.created_at.slice(0,16) : '—'}</td>
       <td>${renderContainerMetrics(c)}</td>
       <td>${statusBadge(c.status)}</td>
@@ -4277,9 +4375,12 @@ function toggleEditContainerGpuFields() {
 function renderEditExtraPortBindings(bindings = null) {
   const container = document.getElementById('edit-ctr-extra-port-bindings');
   const countInput = document.getElementById('edit-ctr-extra-port-count');
-  const count = normalizePortCountInput(countInput.value, 0);
+  const existingRows = [...container.querySelectorAll('.port-binding-row')];
+  const existingCount = existingRows.length;
+  const fallbackCount = Array.isArray(bindings) ? bindings.length : existingCount;
+  const count = normalizePortCountInput(countInput.value, fallbackCount);
   countInput.value = String(count);
-  const current = Array.isArray(bindings) ? bindings : [...container.querySelectorAll('.port-binding-row')].map((row, index) => ({
+  const current = Array.isArray(bindings) ? bindings : existingRows.map((row, index) => ({
     host_port: row.querySelector('.edit-ctr-extra-host-port').value === '自动分配' ? '' : row.querySelector('.edit-ctr-extra-host-port').value,
     container_port: parseInt(row.querySelector('.edit-ctr-extra-container-port').value, 10) || (8000 + index),
     protocol: 'tcp'

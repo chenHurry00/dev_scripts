@@ -1279,6 +1279,11 @@ def normalize_agent_container(raw):
         "ports": raw.get("ports") or [],
         "ports_text": raw.get("ports_text") or raw.get("Ports") or "",
         "ssh_port": parse_agent_ssh_port(raw),
+        "runtime_options": normalize_runtime_options(raw.get("runtime_options", {})),
+        "extra_port_bindings": normalize_extra_port_bindings(
+            raw.get("extra_port_bindings", []),
+            extra_port_count=len(raw.get("extra_port_bindings", [])) if isinstance(raw.get("extra_port_bindings"), list) else None,
+        ),
         "managed": managed,
     }
 
@@ -1529,6 +1534,34 @@ def choose_available_extra_port_block(server, existing_records=None, count=DEFAU
     if len(available) < count:
         return []
     return available[:count]
+
+def fill_missing_extra_host_ports(server, existing_records, extra_port_bindings):
+    bindings = normalize_extra_port_bindings(
+        extra_port_bindings,
+        extra_port_count=len(extra_port_bindings) if isinstance(extra_port_bindings, list) else 0,
+    )
+    assigned_host_ports = set()
+    for binding in bindings:
+        host_port = normalize_container_port_value(binding.get("host_port"))
+        if host_port is None:
+            continue
+        if host_port < EXTRA_PORT_MIN or host_port > EXTRA_PORT_MAX or host_port in assigned_host_ports:
+            return []
+        assigned_host_ports.add(host_port)
+    missing_indexes = [index for index, binding in enumerate(bindings) if not binding.get("host_port")]
+    if not missing_indexes:
+        return bindings
+    reserved_records = list(existing_records or [])
+    if assigned_host_ports:
+        reserved_records.append({
+            "extra_port_bindings": [{"host_port": port} for port in sorted(assigned_host_ports)]
+        })
+    allocated_ports = choose_available_extra_port_block(server, reserved_records, len(missing_indexes))
+    if len(allocated_ports) != len(missing_indexes):
+        return []
+    for index, host_port in zip(missing_indexes, allocated_ports):
+        bindings[index]["host_port"] = host_port
+    return bindings
 
 def normalize_mount_roots(raw):
     """规范化服务器挂载根目录配置。"""
@@ -1928,6 +1961,7 @@ def api_container_metrics():
                 "pids_current": item.get("pids_current"),
                 "disk_rw_bytes": item.get("disk_rw_bytes", 0),
                 "disk_rootfs_bytes": item.get("disk_rootfs_bytes", 0),
+                "port_statuses": item.get("port_statuses", []),
                 "gpu": item.get("gpu", {}),
             }
     return jsonify({
@@ -2415,11 +2449,9 @@ def api_create_container():
         extra_port_count = 0
         extra_port_bindings = []
     else:
-        allocated_ports = choose_available_extra_port_block(server, data["containers"].values(), extra_port_count)
-        if len(allocated_ports) != extra_port_count:
+        extra_port_bindings = fill_missing_extra_host_ports(server, data["containers"].values(), extra_port_bindings)
+        if len(extra_port_bindings) != extra_port_count:
             return jsonify({"error": f"{EXTRA_PORT_MIN}-{EXTRA_PORT_MAX} 范围内没有足够的可用业务端口"}), 400
-        for index, host_port in enumerate(allocated_ports):
-            extra_port_bindings[index]["host_port"] = host_port
 
     mounts = body["mounts"] if "mounts" in body else build_default_mounts(server, assigned_to, name)
     gpu_enabled = bool(body.get("gpu_enabled", False))
@@ -2687,6 +2719,10 @@ def api_rebuild_container(cid):
     if not server:
         return jsonify({"error": "服务器不存在"}), 404
 
+    requested_extra_port_bindings = normalize_extra_port_bindings(
+        body.get("extra_port_bindings", container.get("extra_port_bindings", [])),
+        extra_port_count=len(body.get("extra_port_bindings", container.get("extra_port_bindings", [])) or []),
+    )
     payload = {
         "cpu_limit": body.get("cpu_limit", container.get("cpu_limit")),
         "mem_limit": body.get("mem_limit", container.get("mem_limit")),
@@ -2696,13 +2732,17 @@ def api_rebuild_container(cid):
         "gpu_mode": body.get("gpu_mode", container.get("gpu_mode", "shared") or "shared"),
         "rootfs_limit": str(body.get("rootfs_limit", container.get("rootfs_limit", "")) or "").strip(),
         "runtime_options": normalize_runtime_options(body.get("runtime_options", container.get("runtime_options", {}))),
-        "extra_port_bindings": normalize_extra_port_bindings(
-            body.get("extra_port_bindings", container.get("extra_port_bindings", [])),
-            extra_port_count=len(body.get("extra_port_bindings", container.get("extra_port_bindings", [])) or []),
-        ),
+        "extra_port_bindings": requested_extra_port_bindings,
         "source_type": body.get("source_type", "temporary_snapshot"),
         "image_ref": body.get("image_ref", ""),
     }
+    payload["extra_port_bindings"] = fill_missing_extra_host_ports(
+        server,
+        [record for record in data["containers"].values() if record is not container],
+        payload["extra_port_bindings"],
+    )
+    if len(payload["extra_port_bindings"]) != len(requested_extra_port_bindings):
+        return jsonify({"error": f"{EXTRA_PORT_MIN}-{EXTRA_PORT_MAX} 范围内没有足够的可用业务端口"}), 400
     result = call_agent(server, f"/containers/{container.get('name')}/rebuild", method="POST", body=payload, timeout=1200)
     if not result.get("ok"):
         status_code = result.get("status_code", 500)
