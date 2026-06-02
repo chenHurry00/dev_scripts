@@ -1893,12 +1893,12 @@ def normalize_mount_roots(raw):
     return roots
 
 def default_resources(server):
-    """按服务器真实资源 1/8 生成默认 CPU 和内存。"""
+    """按服务器真实资源 1/4 生成默认 CPU 和内存。"""
     info = call_agent(server, "/sysinfo")
     cpu_cores = int(info.get("cpu_cores") or 8)
     memory_bytes = int(info.get("memory_bytes") or 8 * 1024 * 1024 * 1024)
-    cpu = max(1, cpu_cores // 8)
-    memory_gb = max(1, memory_bytes // 8 // 1024 // 1024 // 1024)
+    cpu = max(1, cpu_cores // 4)
+    memory_gb = max(1, memory_bytes // 4 // 1024 // 1024 // 1024)
     return str(cpu), f"{memory_gb}g"
 
 def build_default_mounts(server, assigned_to, container_name):
