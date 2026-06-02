@@ -564,6 +564,7 @@ body {
 .mobile-card-list {
   display: none;
   gap: 12px;
+  margin-bottom: 24px;
 }
 
 .mobile-card {
@@ -629,6 +630,10 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.mobile-card-list.tight {
+  gap: 10px;
 }
 
 .table-header {
@@ -2003,25 +2008,27 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           <div class="table-header">
             <div class="table-title">拉取任务</div>
           </div>
-          <table>
+          <table class="desktop-table">
             <thead>
               <tr><th>镜像</th><th>状态</th><th>开始时间</th><th>最近进度</th></tr>
             </thead>
             <tbody id="img-task-body"></tbody>
           </table>
         </div>
+        <div class="mobile-card-list tight" id="img-task-card-list"></div>
 
         <div class="table-wrap">
           <div class="table-header">
             <div class="table-title">已下载镜像</div>
           </div>
-          <table>
+          <table class="desktop-table">
             <thead>
               <tr><th>镜像</th><th>类型</th><th>来源容器</th><th>镜像 ID</th><th>创建时间</th><th>大小</th><th>操作</th></tr>
             </thead>
             <tbody id="img-table-body"></tbody>
           </table>
         </div>
+        <div class="mobile-card-list" id="img-card-list"></div>
       </div>
     </div>
 
@@ -2097,7 +2104,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <div class="table-title">用户 GPU 计算时总表</div>
             <input class="table-search" type="text" placeholder="搜索业务用户…" oninput="filterTable(this,'gpu-accounting-table-body')">
           </div>
-          <table>
+          <table class="desktop-table">
             <thead>
               <tr>
                 <th>用户</th>
@@ -2114,6 +2121,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <tbody id="gpu-accounting-table-body"></tbody>
           </table>
         </div>
+        <div class="mobile-card-list" id="gpu-accounting-card-list"></div>
       </div>
     </div>
 
@@ -2136,7 +2144,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
           <div class="table-header">
             <div class="table-title">管理员 / 分配员</div>
           </div>
-          <table>
+          <table class="desktop-table">
             <thead>
               <tr>
                 <th>用户名</th>
@@ -2148,6 +2156,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
             <tbody id="usr-table-body"></tbody>
           </table>
         </div>
+        <div class="mobile-card-list" id="usr-card-list"></div>
         <div class="table-wrap" style="margin-top:18px">
           <div class="table-header">
             <div class="table-title">配置备份与恢复</div>
@@ -3694,6 +3703,109 @@ function renderServerCard(server, containerCountMap) {
   </div>`;
 }
 
+function renderUserCard(user) {
+  const actionHtml = user.username === 'admin'
+    ? '<span class="mobile-card-subtitle">系统账号</span>'
+    : `<button class="btn btn-danger" onclick="delUser('${user.username}')">删除</button>`;
+  return `<div class="mobile-card">
+    <div class="mobile-card-head">
+      <div>
+        <div class="mobile-card-title">${escapeHtml(user.username || '—')}</div>
+        <div class="mobile-card-subtitle">${escapeHtml(user.created_at ? user.created_at.slice(0, 16) : '—')}</div>
+      </div>
+      <div>${roleBadge(user.role)}</div>
+    </div>
+    <div class="mobile-card-actions">${actionHtml}</div>
+  </div>`;
+}
+
+function renderGpuAccountingCard(user) {
+  const usagePercent = Number(user.usage_ratio || 0) * 100;
+  const adminActions = STATE.role === 'admin'
+    ? `
+      <button class="btn" onclick="openGpuBaseQuotaModal('${escapeHtml(user.username)}')">基础额度</button>
+      <button class="btn" onclick="openGpuTempQuotaModal('${escapeHtml(user.username)}')">临时额度</button>
+    `
+    : '';
+  return `<div class="mobile-card">
+    <div class="mobile-card-head">
+      <div>
+        <div class="mobile-card-title">${escapeHtml(user.username || '—')}</div>
+        <div class="mobile-card-subtitle">本周 ${escapeHtml(formatHours(user.weekly_gpu_card_hours))} / ${escapeHtml(formatHours(user.effective_quota_hours))}</div>
+      </div>
+      <div>${gpuQuotaStatusBadge(user.quota_status)}</div>
+    </div>
+    <div class="mobile-card-grid">
+      <div class="mobile-card-item">
+        <div class="mobile-card-label">基础 / 临时额度</div>
+        <div class="mobile-card-value">${escapeHtml(formatHours(user.base_quota_hours))} / +${escapeHtml(formatHours(user.temporary_extra_quota_hours))}</div>
+      </div>
+      <div class="mobile-card-item">
+        <div class="mobile-card-label">使用率 / 超额</div>
+        <div class="mobile-card-value">${escapeHtml(formatPercent(usagePercent))} / ${escapeHtml(formatHours(user.over_quota_hours))}</div>
+      </div>
+      <div class="mobile-card-item">
+        <div class="mobile-card-label">当前活跃 GPU</div>
+        <div class="mobile-card-value">${escapeHtml(String(user.current_active_gpu_count || 0))}</div>
+      </div>
+      <div class="mobile-card-item">
+        <div class="mobile-card-label">当前低效占用</div>
+        <div class="mobile-card-value">${escapeHtml(String(user.current_low_efficiency_gpu_count || 0))}</div>
+      </div>
+    </div>
+    <div class="mobile-card-actions">
+      <button class="btn btn-primary" onclick="openGpuUserDetail('${escapeHtml(user.username)}')">明细</button>
+      ${adminActions}
+    </div>
+  </div>`;
+}
+
+function renderImageCard(serverId, image) {
+  return `<div class="mobile-card">
+    <div class="mobile-card-head">
+      <div>
+        <div class="mobile-card-title">${escapeHtml(getImageDisplayName(image))}</div>
+        <div class="mobile-card-subtitle">${escapeHtml(image.CreatedSince || ((image.CreatedAt || '').slice(0, 19).replace('T', ' ')) || '—')}</div>
+      </div>
+      <div><span class="badge badge-info">${escapeHtml(getImageKindText(image))}</span></div>
+    </div>
+    <div class="mobile-card-grid">
+      <div class="mobile-card-item">
+        <div class="mobile-card-label">来源容器</div>
+        <div class="mobile-card-value">${escapeHtml(image.backup_source_container || '—')}</div>
+      </div>
+      <div class="mobile-card-item">
+        <div class="mobile-card-label">大小</div>
+        <div class="mobile-card-value">${escapeHtml(image.Size || formatBytesCompact(image.SizeBytes || 0))}</div>
+      </div>
+      <div class="mobile-card-item" style="grid-column: 1 / -1;">
+        <div class="mobile-card-label">镜像 ID</div>
+        <div class="mobile-card-value mono">${escapeHtml(image.ID || '—')}</div>
+      </div>
+    </div>
+    <div class="mobile-card-actions">
+      <button class="btn btn-danger" onclick="deleteImage('${escapeHtml(serverId)}', '${escapeHtml(getImageReference(image))}')">删除</button>
+    </div>
+  </div>`;
+}
+
+function renderImageTaskCard(task) {
+  const progress = (task.progress || []).slice(-4).join('\n') || '等待 Agent 返回进度...';
+  return `<div class="mobile-card">
+    <div class="mobile-card-head">
+      <div>
+        <div class="mobile-card-title">${escapeHtml(task.image || '—')}</div>
+        <div class="mobile-card-subtitle">${escapeHtml((task.created_at || '').slice(0, 19).replace('T', ' '))}</div>
+      </div>
+      <div>${statusBadge(task.status)}</div>
+    </div>
+    <div class="mobile-card-item">
+      <div class="mobile-card-label">最近进度</div>
+      <div class="mobile-card-value mono" style="white-space:pre-wrap">${escapeHtml(progress)}</div>
+    </div>
+  </div>`;
+}
+
 function renderServerCheckCell(server) {
   const checks = server.checks || {};
   const warnings = (checks.warnings || []).length;
@@ -3996,6 +4108,14 @@ async function loadUsers() {
   document.getElementById('badge-usr').textContent = STATE.users.length;
   document.getElementById('ov-usr').textContent = STATE.users.length;
   const tbody = document.getElementById('usr-table-body');
+  const cardList = document.getElementById('usr-card-list');
+  if (!STATE.users.length) {
+    tbody.innerHTML = '<tr><td colspan="4">暂无平台用户。</td></tr>';
+    if (cardList) {
+      cardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-title">暂无平台用户</div></div></div>`;
+    }
+    return;
+  }
   tbody.innerHTML = STATE.users.map(u => `
     <tr>
       <td class="td-hi">${u.username}</td>
@@ -4004,6 +4124,9 @@ async function loadUsers() {
       <td>${u.username === 'admin' ? '<span style="color:var(--text-lo);font-size:11px">系统账号</span>' :
         `<button class="btn btn-danger" onclick="delUser('${u.username}')">删除</button>`}</td>
     </tr>`).join('');
+  if (cardList) {
+    cardList.innerHTML = STATE.users.map(renderUserCard).join('');
+  }
 }
 
 /* ═══════════════════════════════════════════════
@@ -4069,6 +4192,7 @@ function renderGpuServerErrorSummary(errors) {
 
 function renderGpuAccountingTable() {
   const tbody = document.getElementById('gpu-accounting-table-body');
+  const cardList = document.getElementById('gpu-accounting-card-list');
   const summary = STATE.gpuAccountingSummary || {};
   const users = summary.users || [];
   document.getElementById('badge-gpu').textContent = String((summary.stats && summary.stats.over_quota_user_count) || 0);
@@ -4078,6 +4202,9 @@ function renderGpuAccountingTable() {
       <div class="empty-title">暂无 GPU 计算时记录</div>
       <div class="empty-sub">等待后台采样累计后会在这里展示业务用户总表</div>
     </div></td></tr>`;
+    if (cardList) {
+      cardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-icon">◫</div><div class="empty-title">暂无 GPU 计算时记录</div><div class="empty-sub">等待后台采样累计后会在这里展示业务用户总表</div></div></div>`;
+    }
     return;
   }
   tbody.innerHTML = users.map(user => {
@@ -4115,6 +4242,9 @@ function renderGpuAccountingTable() {
       </tr>
     `;
   }).join('');
+  if (cardList) {
+    cardList.innerHTML = users.map(renderGpuAccountingCard).join('');
+  }
 }
 
 function applyGpuAccountingSummary(summary) {
@@ -4537,6 +4667,14 @@ async function loadImagesPanel() {
       '<tr><td colspan="7">请先选择目标服务器。</td></tr>';
     document.getElementById('img-task-body').innerHTML =
       '<tr><td colspan="4">请先选择目标服务器。</td></tr>';
+    const imgCardList = document.getElementById('img-card-list');
+    const taskCardList = document.getElementById('img-task-card-list');
+    if (imgCardList) {
+      imgCardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-title">请先选择目标服务器</div></div></div>`;
+    }
+    if (taskCardList) {
+      taskCardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-title">请先选择目标服务器</div></div></div>`;
+    }
     return;
   }
   await Promise.all([loadImages(), loadImageTasks()]);
@@ -4554,14 +4692,21 @@ async function loadImages() {
   if (!serverId) return;
   const data = await api(`/api/images?server_id=${encodeURIComponent(serverId)}`);
   const tbody = document.getElementById('img-table-body');
+  const cardList = document.getElementById('img-card-list');
   if (data.error) {
     tbody.innerHTML = `<tr><td colspan="7">读取失败：${escapeHtml(data.error)}</td></tr>`;
+    if (cardList) {
+      cardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-title">读取失败</div><div class="empty-sub">${escapeHtml(data.error)}</div></div></div>`;
+    }
     return;
   }
   const images = data.images || [];
   cacheImageCatalog(serverId, images);
   if (!images.length) {
     tbody.innerHTML = '<tr><td colspan="7">该服务器尚未下载镜像。</td></tr>';
+    if (cardList) {
+      cardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-title">该服务器尚未下载镜像</div></div></div>`;
+    }
     return;
   }
   tbody.innerHTML = images.map(image => `
@@ -4574,6 +4719,9 @@ async function loadImages() {
       <td>${escapeHtml(image.Size || formatBytesCompact(image.SizeBytes || 0))}</td>
       <td><button class="btn btn-danger" onclick="deleteImage('${escapeHtml(serverId)}', '${escapeHtml(getImageReference(image))}')">删除</button></td>
     </tr>`).join('');
+  if (cardList) {
+    cardList.innerHTML = images.map(image => renderImageCard(serverId, image)).join('');
+  }
 }
 
 async function loadImageTasks() {
@@ -4582,8 +4730,12 @@ async function loadImageTasks() {
   const data = await api(`/api/images/tasks?server_id=${encodeURIComponent(serverId)}`);
   const tasks = data.tasks || [];
   const tbody = document.getElementById('img-task-body');
+  const cardList = document.getElementById('img-task-card-list');
   if (!tasks.length) {
     tbody.innerHTML = '<tr><td colspan="4">暂无镜像拉取任务。</td></tr>';
+    if (cardList) {
+      cardList.innerHTML = `<div class="mobile-card"><div class="empty-state"><div class="empty-title">暂无镜像拉取任务</div></div></div>`;
+    }
     return;
   }
   tbody.innerHTML = tasks.map(task => {
@@ -4595,6 +4747,9 @@ async function loadImageTasks() {
       <td><div class="td-mono" style="white-space:pre-wrap;font-size:11px">${escapeHtml(progress)}</div></td>
     </tr>`;
   }).join('');
+  if (cardList) {
+    cardList.innerHTML = tasks.map(renderImageTaskCard).join('');
+  }
   tasks.forEach(task => {
     if ((task.status === 'done' || task.status === 'error') && !STATE.finishedImageTasks[task.id]) {
       STATE.finishedImageTasks[task.id] = true;
