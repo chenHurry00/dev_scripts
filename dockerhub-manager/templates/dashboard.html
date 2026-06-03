@@ -2315,7 +2315,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
       <div class="form-field">
         <label class="form-label"><input type="checkbox" id="ctr-password-access" onchange="togglePasswordAccess()"> 启用 SSH 密码登录</label>
         <input class="form-input" type="password" id="ctr-ssh-password" placeholder="至少 8 位" style="display:none">
-        <div class="form-hint">当前创建的登录用户默认授予 sudo 权限。密码不会保存到面板配置；如需设置 root 密码，可登录后执行 <code>sudo passwd root</code>。</div>
+        <div class="form-hint">当前创建的登录用户默认授予 sudo 权限。密码不会保存到面板配置；如需设置 root 密码，可登录后执行 <code>sudo passwd root</code>。默认12345678</div>
       </div>
       <div class="form-row">
         <div class="form-field">
@@ -3361,7 +3361,11 @@ async function loadSelectedServerImages() {
 
 function togglePasswordAccess() {
   const enabled = document.getElementById('ctr-password-access').checked;
-  document.getElementById('ctr-ssh-password').style.display = enabled ? 'block' : 'none';
+  const passwordInput = document.getElementById('ctr-ssh-password');
+  passwordInput.style.display = enabled ? 'block' : 'none';
+  if (enabled && !passwordInput.value) {
+    passwordInput.value = '12345678';
+  }
 }
 
 function normalizePortCountInput(value, fallback = 5) {
