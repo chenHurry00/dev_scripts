@@ -81,6 +81,7 @@
 
 ```bash
 ssh -p 32000 youruser@server-ip
+ssh-copy-id -p 32000 youruser@server-ip #设置登录免密
 ```
 
 登录后建议确认当前环境：
@@ -127,6 +128,10 @@ pwd
 
 1. 将文件传输至挂载目录
 2. 登录容器确认文件可见性
+```bash
+# 将文件传输到容器挂载的数据盘
+scp -P 32000 FILE_NAME youruser@server-ip:/DATA/
+```
 
 传输完成后建议执行检查：
 
