@@ -519,7 +519,7 @@ body {
 
 .overview-runtime-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: 1fr;
   gap: 12px;
 }
 
@@ -3880,7 +3880,7 @@ function renderRuntimeRing(metric) {
 function buildServerRuntimeMetrics(server, options = {}) {
   const runtime = server && server.runtime ? server.runtime : {};
   const compact = !!options.compact;
-  const gpuLimit = compact ? 3 : RUNTIME_GPU_COLLAPSED_COUNT;
+  const gpuLimit = compact ? 2 : RUNTIME_GPU_COLLAPSED_COUNT;
   if (!runtime || (!runtime.sampled_at && !runtime.error)) {
     return [{
       value: '—',
