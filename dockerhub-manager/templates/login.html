@@ -266,7 +266,7 @@
     <div class="error-msg">⚠ {{ error }}</div>
     {% endif %}
 
-    <form method="POST" action="/login">
+    <form method="POST" action="{{ panel_login_url }}">
       <div class="field">
         <label>用户名 Username</label>
         <input type="text" name="username" placeholder="admin" autocomplete="username" required>

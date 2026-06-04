@@ -25,6 +25,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production-please")
 APP_MODE = str(os.environ.get("APP_MODE", "panel") or "panel").strip().lower()
+PANEL_ACCESS_TOKEN = re.sub(r"[^A-Za-z0-9]", "", str(os.environ.get("PANEL_ACCESS_TOKEN", "") or ""))[:16]
 admin_password_b64 = os.environ.get("ADMIN_PASSWORD_B64", "")
 admin_password = (
     base64.b64decode(admin_password_b64).decode("utf-8")
@@ -1687,12 +1688,78 @@ def build_server_runtime_summary_payload(data=None, include_sensitive=True, gpu_
         "servers": items,
     }
 
+def panel_access_token_enabled():
+    return APP_MODE == "panel" and len(PANEL_ACCESS_TOKEN) == 16
+
+def panel_access_prefix():
+    return f"/{PANEL_ACCESS_TOKEN}" if panel_access_token_enabled() else ""
+
+def panel_path(path="/"):
+    prefix = panel_access_prefix()
+    target = str(path or "").strip() or "/"
+    if not target.startswith("/"):
+        target = f"/{target}"
+    if not prefix:
+        return target
+    if target == prefix or target.startswith(prefix + "/"):
+        return target
+    if target == "/":
+        return prefix
+    return f"{prefix}{target}"
+
+def strip_panel_access_prefix(path):
+    target = str(path or "").strip() or "/"
+    if not target.startswith("/"):
+        target = f"/{target}"
+    prefix = panel_access_prefix()
+    if prefix and target == prefix:
+        return "/"
+    if prefix and target.startswith(prefix + "/"):
+        return target[len(prefix):]
+    return target
+
+def is_panel_guarded_path(path):
+    normalized = strip_panel_access_prefix(path)
+    return (
+        normalized in {"/", "/login", "/logout", "/dashboard"}
+        or normalized.startswith("/api/")
+    )
+
+def panel_redirect_to(endpoint, **values):
+    return redirect(panel_path(url_for(endpoint, **values)))
+
+@app.context_processor
+def inject_panel_template_context():
+    return {
+        "panel_base_path": panel_access_prefix(),
+        "panel_login_url": panel_path("/login"),
+        "panel_logout_url": panel_path("/logout"),
+        "panel_dashboard_url": panel_path("/dashboard"),
+    }
+
+@app.before_request
+def enforce_panel_access_token():
+    if not panel_access_token_enabled():
+        return None
+    if request.endpoint == "static":
+        return None
+    if not is_panel_guarded_path(request.path):
+        return None
+    prefix = panel_access_prefix()
+    if request.path == prefix or request.path.startswith(prefix + "/"):
+        return None
+    normalized = strip_panel_access_prefix(request.path)
+    if normalized.startswith("/api/"):
+        return jsonify({"ok": False, "error": "Not Found"}), 404
+    return ("Not Found", 404)
+
 @app.errorhandler(Exception)
 def handle_exception(exc):
     if isinstance(exc, HTTPException):
         return exc
     app.logger.exception("Unhandled exception")
-    if request.path.startswith("/api/") or request.path.startswith("/portal-api/"):
+    normalized_path = strip_panel_access_prefix(request.path) if APP_MODE == "panel" else request.path
+    if normalized_path.startswith("/api/") or normalized_path.startswith("/portal-api/"):
         return jsonify({"ok": False, "error": f"服务器内部错误: {exc}"}), 500
     return f"服务器内部错误: {exc}", 500
 
@@ -2320,7 +2387,7 @@ def build_default_mounts(server, assigned_to, container_name):
 
 # ── 模板加载工具 ────────────────────────────────────────────────────────────
 def load_template(name):
-    p = Path("templates") / name
+    p = APP_DIR / "templates" / name
     if p.exists():
         return p.read_text(encoding="utf-8")
     return f"<h1>模板 {name} 未找到</h1>"
@@ -2334,7 +2401,7 @@ def login_required(f):
         if APP_MODE != "panel":
             return ("Not Found", 404)
         if "user" not in session:
-            return redirect(url_for("login"))
+            return panel_redirect_to("login")
         return f(*args, **kwargs)
     return decorated
 
@@ -2369,8 +2436,8 @@ def portal_mode_required(f):
 @panel_mode_required
 def index():
     if "user" not in session:
-        return redirect(url_for("login"))
-    return redirect(url_for("dashboard"))
+        return panel_redirect_to("login")
+    return panel_redirect_to("dashboard")
 
 @app.route("/login", methods=["GET", "POST"])
 @panel_mode_required
@@ -2389,7 +2456,7 @@ def login():
                     save_data(data)
                 session["user"] = username
                 session["role"] = user["role"]
-                return redirect(url_for("dashboard"))
+                return panel_redirect_to("dashboard")
         error = "用户名或密码错误"
     return render_template_string(
         load_template("login.html"),
@@ -2401,7 +2468,7 @@ def login():
 @panel_mode_required
 def logout():
     session.clear()
-    return redirect(url_for("login"))
+    return panel_redirect_to("login")
 
 # ── 路由：主页面（SPA 壳） ───────────────────────────────────────────────────
 @app.route("/dashboard")
@@ -3846,6 +3913,30 @@ def api_config_import():
         append_audit(data, message, "WARN")
         save_data(data)
     return jsonify({"ok": True, "users_ignored": users_ignored})
+
+def register_panel_access_routes():
+    if not panel_access_token_enabled():
+        return
+    existing_rules = {rule.rule for rule in app.url_map.iter_rules()}
+    for rule in list(app.url_map.iter_rules()):
+        if rule.endpoint == "static":
+            continue
+        if not is_panel_guarded_path(rule.rule):
+            continue
+        token_rule = panel_path(rule.rule)
+        if token_rule in existing_rules:
+            continue
+        methods = sorted(method for method in rule.methods if method not in {"HEAD", "OPTIONS"})
+        app.add_url_rule(
+            token_rule,
+            endpoint=f"{rule.endpoint}__panel_access__{len(existing_rules)}",
+            view_func=app.view_functions[rule.endpoint],
+            defaults=rule.defaults,
+            methods=methods or None,
+        )
+        existing_rules.add(token_rule)
+
+register_panel_access_routes()
 
 if APP_MODE == "panel":
     ensure_gpu_accounting_worker_started()

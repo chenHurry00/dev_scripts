@@ -2011,7 +2011,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
       </div>
     </div>
 
-    <a href="/logout" class="btn-logout">退出</a>
+    <a href="{{ panel_logout_url }}" class="btn-logout">退出</a>
   </div>
 </div>
 
@@ -3743,8 +3743,17 @@ function filterTable(input, tbodyId) {
 /* ═══════════════════════════════════════════════
    API HELPERS
 ═══════════════════════════════════════════════ */
+const PANEL_BASE_PATH = {{ panel_base_path | tojson }};
+
+function panelPath(path) {
+  if (!path || typeof path !== 'string') return path;
+  if (!PANEL_BASE_PATH || !path.startsWith('/')) return path;
+  if (path === PANEL_BASE_PATH || path.startsWith(`${PANEL_BASE_PATH}/`)) return path;
+  return `${PANEL_BASE_PATH}${path}`;
+}
+
 async function api(url, opts = {}) {
-  const r = await fetch(url, {
+  const r = await fetch(panelPath(url), {
     headers: { 'Content-Type': 'application/json' },
     ...opts
   });
@@ -5005,7 +5014,7 @@ async function resetGpuPortalLink(username) {
 
 async function exportGpuPortalLinksCsv() {
   try {
-    const response = await fetch('/api/gpu-accounting/portal-links/export');
+    const response = await fetch(panelPath('/api/gpu-accounting/portal-links/export'));
     if (!response.ok) {
       const data = await response.json();
       throw new Error(data.error || 'CSV 导出失败');

@@ -38,11 +38,23 @@ read_env_value() {
 
 ensure_panel_env_defaults() {
   local current_docs_port
+  local current_panel_access_token
+  local defaults_added="0"
   current_docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
+  current_panel_access_token="$(read_env_value "$PANEL_ENV" PANEL_ACCESS_TOKEN || true)"
   if [[ -f "$PANEL_ENV" && -z "$current_docs_port" ]]; then
     run_root tee -a "$PANEL_ENV" >/dev/null <<EOF
 DOCS_PORT=5003
 EOF
+    defaults_added="1"
+  fi
+  if [[ -f "$PANEL_ENV" && -z "$current_panel_access_token" ]]; then
+    run_root tee -a "$PANEL_ENV" >/dev/null <<EOF
+PANEL_ACCESS_TOKEN=$(random_panel_access_token)
+EOF
+    defaults_added="1"
+  fi
+  if [[ -f "$PANEL_ENV" && "$defaults_added" == "1" ]]; then
     run_root chmod 0600 "$PANEL_ENV"
   fi
 }
@@ -168,6 +180,14 @@ random_secret() {
   openssl rand -hex 32
 }
 
+random_panel_access_token() {
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "错误：未检测到 openssl，无法生成面板访问令牌。"
+    exit 10
+  fi
+  openssl rand -hex 8
+}
+
 confirm_action() {
   local operation="$1"
   local scope="$2"
@@ -269,6 +289,8 @@ configure_panel_env() {
   local gpu_portal_port
   local current_docs_port
   local docs_port
+  local current_panel_access_token
+  local panel_access_token
   local secret_key
   local admin_password
   local admin_password_b64
@@ -280,6 +302,9 @@ configure_panel_env() {
   current_password_b64="$(read_env_value "$PANEL_ENV" ADMIN_PASSWORD_B64 || true)"
   gpu_portal_port="$(read_env_value "$PANEL_ENV" GPU_PORTAL_PORT || true)"
   current_docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
+  current_panel_access_token="$(read_env_value "$PANEL_ENV" PANEL_ACCESS_TOKEN || true)"
+  current_panel_access_token="${current_panel_access_token//[^A-Za-z0-9]/}"
+  current_panel_access_token="${current_panel_access_token:0:16}"
 
   read -r -p "中心面板端口 [${current_port:-5000}]: " panel_port
   panel_port="${panel_port:-${current_port:-5000}}"
@@ -301,6 +326,7 @@ configure_panel_env() {
   fi
 
   secret_key="${current_secret:-$(random_secret)}"
+  panel_access_token="${current_panel_access_token:-$(random_panel_access_token)}"
   if [[ -f "$PANEL_DIR/data.json" ]]; then
     admin_password_b64="${current_password_b64:-$(printf '%s' "${current_password:-unused-after-data-initialized}" | base64 | tr -d '\n')}"
     echo "检测到现有 data.json，将保留当前 admin 密码。"
@@ -330,6 +356,7 @@ ADMIN_PASSWORD_B64=${admin_password_b64}
 PANEL_PORT=${panel_port}
 GPU_PORTAL_PORT=${gpu_portal_port}
 DOCS_PORT=${docs_port}
+PANEL_ACCESS_TOKEN=${panel_access_token}
 DEBUG=0
 EOF
   run_root chmod 0600 "$PANEL_ENV"
@@ -339,6 +366,7 @@ EOF
   echo "  监听端口: ${panel_port}"
   echo "  GPU 门户端口: ${gpu_portal_port}"
   echo "  文档站端口: ${docs_port}"
+  echo "  面板访问令牌: ${panel_access_token}"
   echo "  管理员账号: admin"
   if [[ ! -f "$PANEL_DIR/data.json" ]]; then
     echo "  管理员密码: 已按输入值设置"
@@ -439,18 +467,58 @@ EOF
   run_root systemctl restart dockerhub-docs
 }
 
+panel_access_path() {
+  local panel_access_token
+  panel_access_token="$(read_env_value "$PANEL_ENV" PANEL_ACCESS_TOKEN || true)"
+  panel_access_token="${panel_access_token//[^A-Za-z0-9]/}"
+  panel_access_token="${panel_access_token:0:16}"
+  if [[ -n "$panel_access_token" ]]; then
+    echo "/${panel_access_token}/dashboard"
+  else
+    echo "/dashboard"
+  fi
+}
+
+detect_primary_ip() {
+  local item
+  if command -v hostname >/dev/null 2>&1; then
+    for item in $(hostname -I 2>/dev/null); do
+      if [[ "$item" == *.* && "$item" != 127.* ]]; then
+        echo "$item"
+        return 0
+      fi
+    done
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    item="$(ip route get 1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+    if [[ -n "$item" && "$item" != 127.* ]]; then
+      echo "$item"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 show_panel_firewall_hint() {
   local panel_port
   local gpu_portal_port
   local docs_port
+  local panel_link_path
+  local primary_ip
   panel_port="$(read_env_value "$PANEL_ENV" PANEL_PORT || true)"
   gpu_portal_port="$(read_env_value "$PANEL_ENV" GPU_PORTAL_PORT || true)"
   docs_port="$(read_env_value "$PANEL_ENV" DOCS_PORT || true)"
+  panel_link_path="$(panel_access_path)"
+  primary_ip="$(detect_primary_ip || true)"
   echo ""
   echo "面板端口提醒："
   echo "  - 请在 1Panel、系统防火墙或云安全组中放行 TCP ${panel_port:-5000}"
   echo "  - 来源建议限制为局域网管理员网段"
-  echo "  - 局域网管理员访问：http://<中心服务器IP>:${panel_port:-5000}"
+  echo "  - 面板访问入口：http://<中心服务器IP>:${panel_port:-5000}${panel_link_path}"
+  echo "  - 本机回环访问：http://127.0.0.1:${panel_port:-5000}${panel_link_path}"
+  if [[ -n "$primary_ip" ]]; then
+    echo "  - 当前主机推测地址：http://${primary_ip}:${panel_port:-5000}${panel_link_path}"
+  fi
   echo "  - GPU 门户可选端口：http://<中心服务器IP>:${gpu_portal_port:-5002}/portal/<token>"
   if [[ -f "$DOCS_SERVICE" ]]; then
     echo "  - 文档站访问：http://<中心服务器IP>:${docs_port:-5003}"
