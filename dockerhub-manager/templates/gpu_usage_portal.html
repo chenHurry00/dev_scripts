@@ -115,11 +115,151 @@ tr:last-child td {
   border-radius: 999px;
   font-size: 12px;
   border: 1px solid var(--border);
+  white-space: nowrap;
 }
 .badge.ok { color: var(--ok); border-color: rgba(0,229,160,.35); }
 .badge.warn { color: var(--warn); border-color: rgba(255,170,0,.35); }
 .badge.danger { color: var(--danger); border-color: rgba(255,85,102,.35); }
 .badge.info { color: var(--accent); border-color: rgba(0,212,255,.35); }
+.runtime-server-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+.runtime-server-card {
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.runtime-server-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.runtime-server-title {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.runtime-server-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.runtime-ring-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 18px;
+  align-items: flex-start;
+}
+.runtime-ring {
+  --ring-color: var(--accent);
+  --ring-glow: rgba(0, 212, 255, 0.18);
+  --ring-glow-outer: rgba(0, 212, 255, 0.12);
+  --ring-progress: 0%;
+  width: 104px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+}
+.runtime-ring.ok {
+  --ring-color: var(--ok);
+  --ring-glow: rgba(0, 229, 160, 0.18);
+  --ring-glow-outer: rgba(0, 229, 160, 0.12);
+}
+.runtime-ring.warn {
+  --ring-color: var(--warn);
+  --ring-glow: rgba(255, 170, 0, 0.28);
+  --ring-glow-outer: rgba(255, 170, 0, 0.16);
+}
+.runtime-ring.danger {
+  --ring-color: var(--danger);
+  --ring-glow: rgba(255, 85, 102, 0.3);
+  --ring-glow-outer: rgba(255, 85, 102, 0.18);
+}
+.runtime-ring.muted {
+  --ring-color: var(--accent);
+  --ring-glow: rgba(0, 212, 255, 0.14);
+  --ring-glow-outer: rgba(0, 212, 255, 0.1);
+}
+.runtime-ring-visual {
+  position: relative;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  background: conic-gradient(from -90deg, var(--ring-color) var(--ring-progress), rgba(255,255,255,0.06) 0);
+  box-shadow:
+    0 0 10px var(--ring-glow),
+    0 0 18px var(--ring-glow-outer),
+    inset 0 0 0 1px rgba(255,255,255,0.04);
+}
+.runtime-ring-visual::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, rgba(12,16,24,0.98), rgba(18,26,38,0.96));
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.05),
+    0 0 8px rgba(0,0,0,0.16);
+}
+.runtime-ring-core {
+  position: absolute;
+  inset: 10px;
+  z-index: 1;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px;
+  text-align: center;
+}
+.runtime-ring-value {
+  font-size: 21px;
+  line-height: 1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.runtime-ring-label {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.runtime-ring-subtitle {
+  width: 100%;
+  text-align: center;
+  color: var(--low);
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.runtime-ring-toggle {
+  cursor: pointer;
+}
+.runtime-ring-toggle:hover .runtime-ring-core,
+.runtime-ring-toggle:hover .runtime-ring-visual::before {
+  box-shadow:
+    inset 0 0 0 1px rgba(0,212,255,0.26),
+    0 0 10px rgba(0,212,255,0.1);
+}
 .chart {
   width: 100%;
   min-height: 260px;
@@ -156,6 +296,32 @@ tr:last-child td {
   }
   .value {
     font-size: 24px;
+  }
+  .runtime-server-grid {
+    grid-template-columns: 1fr;
+  }
+  .runtime-ring {
+    width: 90px;
+  }
+  .runtime-ring-visual {
+    width: 78px;
+    height: 78px;
+  }
+  .runtime-ring-visual::before {
+    inset: 2px;
+  }
+  .runtime-ring-core {
+    inset: 8px;
+    padding: 5px;
+  }
+  .runtime-ring-value {
+    font-size: 18px;
+  }
+  .runtime-ring-label {
+    font-size: 10px;
+  }
+  .runtime-ring-subtitle {
+    font-size: 10px;
   }
   table, thead, tbody, th, td, tr {
     display: block;
@@ -208,6 +374,34 @@ tr:last-child td {
     <div class="panel">
       <div class="panel-head">
         <div>
+          <div class="panel-title">服务器状态</div>
+          <div class="hint" id="runtime-last-sample">—</div>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <div class="label">在线 GPU 服务器</div>
+          <div class="value mono" id="rt-online">—</div>
+        </div>
+        <div class="card">
+          <div class="label">空闲 GPU / 总 GPU</div>
+          <div class="value mono" id="rt-idle">—</div>
+        </div>
+        <div class="card">
+          <div class="label">资源紧张服务器</div>
+          <div class="value mono" id="rt-tight">—</div>
+        </div>
+        <div class="card">
+          <div class="label">状态过期服务器</div>
+          <div class="value mono" id="rt-expired">—</div>
+        </div>
+      </div>
+      <div class="runtime-server-grid" id="runtime-server-grid"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div>
           <div class="panel-title">用量曲线</div>
           <div class="hint" id="chart-window">—</div>
         </div>
@@ -241,6 +435,8 @@ tr:last-child td {
 
 <script>
 const PORTAL_TOKEN = {{ portal_token|tojson }};
+const RUNTIME_GPU_COLLAPSED_COUNT = 4;
+const PORTAL_RUNTIME_EXPANDED_GPU = {};
 
 function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, ch => ({
@@ -261,6 +457,36 @@ function formatPercent(value) {
   return `${num >= 10 ? num.toFixed(0) : num.toFixed(1)}%`;
 }
 
+function formatBytesCompact(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return '—';
+  if (value === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  const digits = size >= 100 || index === 0 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[index]}`;
+}
+
+function formatBytesPair(usedBytes, totalBytes) {
+  const total = Number(totalBytes || 0);
+  const used = Number(usedBytes || 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    return formatBytesCompact(used);
+  }
+  return `${formatBytesCompact(used)} / ${formatBytesCompact(total)}`;
+}
+
+function formatDateTimeText(value) {
+  const text = String(value || '').trim();
+  if (!text) return '—';
+  return text.slice(0, 19).replace('T', ' ');
+}
+
 function quotaBadge(status) {
   const map = {
     normal: ['ok', '正常'],
@@ -272,10 +498,241 @@ function quotaBadge(status) {
   return `<span class="badge ${item[0]}">${item[1]}</span>`;
 }
 
+function runtimeBadge(status) {
+  if (!status) {
+    return '<span class="badge info">采集中</span>';
+  }
+  const map = {
+    trainable: ['ok', '可训练'],
+    tight: ['warn', '资源紧张'],
+    expired: ['danger', '状态过期']
+  };
+  const item = map[status] || ['danger', '状态过期'];
+  return `<span class="badge ${item[0]}">${item[1]}</span>`;
+}
+
 async function portalApi(path) {
   const response = await fetch(path);
   return response.json();
 }
+
+function clampRuntimePercent(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.max(0, Math.min(100, num));
+}
+
+function formatRuntimeFraction(current, total) {
+  const currentValue = Math.max(0, Number(current || 0));
+  const totalValue = Math.max(0, Number(total || 0));
+  return `${Math.round(currentValue)}/${Math.round(totalValue)}`;
+}
+
+function runtimeGpuDeviceState(device) {
+  const util = Number(device && device.utilization_gpu || 0);
+  const memoryPercent = Number(device && device.memory_usage_percent || 0);
+  if (util > 90 || memoryPercent > 90) return 'danger';
+  if (util > 60 || memoryPercent > 60) return 'warn';
+  return 'ok';
+}
+
+function runtimeGpuDeviceScore(device) {
+  const util = Number(device && device.utilization_gpu || 0);
+  const memoryPercent = Number(device && device.memory_usage_percent || 0);
+  const activeBias = device && device.active ? 1000 : 0;
+  return activeBias + Math.max(util, memoryPercent);
+}
+
+function sortRuntimeGpuDevices(devices) {
+  return [...(Array.isArray(devices) ? devices : [])].sort((left, right) => {
+    const diff = runtimeGpuDeviceScore(right) - runtimeGpuDeviceScore(left);
+    if (diff !== 0) return diff;
+    return String(left && left.id || '').localeCompare(String(right && right.id || ''), 'zh-CN', { numeric: true });
+  });
+}
+
+function renderRuntimeRing(metric) {
+  const tag = metric.toggle ? 'button' : 'div';
+  const toggleAttr = metric.toggle ? ` type="button" data-runtime-gpu-toggle="${escapeHtml(metric.serverId || '')}"` : '';
+  const toggleClass = metric.toggle ? ' runtime-ring-toggle' : '';
+  return `<${tag} class="runtime-ring ${metric.state || 'muted'}${toggleClass}"${toggleAttr} style="--ring-progress:${clampRuntimePercent(metric.progress).toFixed(1)}%">
+    <div class="runtime-ring-visual">
+      <div class="runtime-ring-core">
+        <div class="runtime-ring-value">${escapeHtml(metric.value || '—')}</div>
+        <div class="runtime-ring-label">${escapeHtml(metric.label || '')}</div>
+      </div>
+    </div>
+    <div class="runtime-ring-subtitle">${escapeHtml(metric.subtitle || '—')}</div>
+  </${tag}>`;
+}
+
+function buildRuntimeMetrics(item) {
+  const runtime = item && item.runtime ? item.runtime : {};
+  if (!runtime || (!runtime.sampled_at && !runtime.error)) {
+    return [{
+      value: '—',
+      label: '运行状态',
+      subtitle: '等待采样',
+      progress: 0,
+      state: 'muted'
+    }];
+  }
+  const cpu = runtime.cpu || {};
+  const memory = runtime.memory || {};
+  const gpu = runtime.gpu || {};
+  const storage = runtime.storage || {};
+  const workspace = storage.workspace || {};
+  const metrics = [
+    {
+      value: formatPercent(cpu.usage_percent || 0),
+      label: 'CPU',
+      subtitle: `Load ${Number(cpu.load1 || 0).toFixed(1)} / ${cpu.cores || '—'}核`,
+      progress: cpu.usage_percent || 0,
+      state: cpu.state || 'muted'
+    },
+    {
+      value: formatPercent(memory.usage_percent || 0),
+      label: '内存',
+      subtitle: formatBytesPair(memory.used_bytes || 0, memory.total_bytes || 0),
+      progress: memory.usage_percent || 0,
+      state: memory.state || memory.overall_state || 'muted'
+    },
+    {
+      value: formatPercent(memory.swap_usage_percent || 0),
+      label: 'SWAP',
+      subtitle: Number(memory.swap_total_bytes || 0) > 0
+        ? formatBytesPair(memory.swap_used_bytes || 0, memory.swap_total_bytes || 0)
+        : '未启用',
+      progress: Number(memory.swap_total_bytes || 0) > 0 ? (memory.swap_usage_percent || 0) : 0,
+      state: memory.swap_state || 'ok'
+    }
+  ];
+
+  const dockerRoot = storage.docker_root || {};
+  metrics.push({
+    value: formatPercent(dockerRoot.usage_percent || 0),
+    label: 'Docker',
+    subtitle: Number(dockerRoot.total_bytes || 0) > 0
+      ? formatBytesPair(dockerRoot.used_bytes || 0, dockerRoot.total_bytes || 0)
+      : '未检测到',
+    progress: dockerRoot.usage_percent || 0,
+    state: dockerRoot.state || 'muted'
+  });
+
+  metrics.push({
+    value: formatPercent(workspace.usage_percent || 0),
+    label: '工作区',
+    subtitle: Number(workspace.count || 0) > 1
+      ? `${workspace.count} 挂载点 | 空闲 ${formatBytesCompact(workspace.free_bytes || 0)}`
+      : (Number(workspace.total_bytes || 0) > 0 ? formatBytesPair(workspace.used_bytes || 0, workspace.total_bytes || 0) : '未配置'),
+    progress: workspace.usage_percent || 0,
+    state: workspace.state || 'ok'
+  });
+
+  if (Number(gpu.device_count || 0) > 0) {
+    metrics.push({
+      value: formatRuntimeFraction(gpu.active_device_count || 0, gpu.device_count || 0),
+      label: 'GPU汇总',
+      subtitle: `VRAM ${formatBytesPair(gpu.used_memory_bytes || 0, gpu.total_memory_bytes || 0)}`,
+      progress: Number(gpu.device_count || 0) > 0 ? (Number(gpu.active_device_count || 0) / Number(gpu.device_count || 1)) * 100 : 0,
+      state: gpu.state || 'ok'
+    });
+    const devices = sortRuntimeGpuDevices(gpu.devices || []);
+    const expanded = !!PORTAL_RUNTIME_EXPANDED_GPU[item.id];
+    const visibleDevices = expanded ? devices : devices.slice(0, RUNTIME_GPU_COLLAPSED_COUNT);
+    visibleDevices.forEach(device => {
+      metrics.push({
+        value: formatPercent(device.utilization_gpu || 0),
+        label: `GPU-${device.id || '?'}`,
+        subtitle: formatBytesPair(device.memory_used_bytes || 0, device.memory_total_bytes || 0),
+        progress: Math.max(Number(device.utilization_gpu || 0), Number(device.memory_usage_percent || 0)),
+        state: runtimeGpuDeviceState(device)
+      });
+    });
+    if (!expanded && devices.length > RUNTIME_GPU_COLLAPSED_COUNT) {
+      metrics.push({
+        value: `+${devices.length - RUNTIME_GPU_COLLAPSED_COUNT}`,
+        label: 'GPU',
+        subtitle: '展开全部',
+        progress: 0,
+        state: 'muted',
+        toggle: true,
+        serverId: item.id
+      });
+    } else if (expanded && devices.length > RUNTIME_GPU_COLLAPSED_COUNT) {
+      metrics.push({
+        value: '收起',
+        label: 'GPU',
+        subtitle: `已展开 ${devices.length} 张`,
+        progress: 0,
+        state: 'muted',
+        toggle: true,
+        serverId: item.id
+      });
+    }
+  } else {
+    metrics.push({
+      value: '0',
+      label: 'GPU',
+      subtitle: '无可用设备',
+      progress: 0,
+      state: 'warn'
+    });
+  }
+
+  return metrics;
+}
+
+function renderRuntimeCard(item) {
+  const runtime = item.runtime || {};
+  const subtitle = runtime.sampled_at
+    ? `最近采样 ${formatDateTimeText(runtime.sampled_at)}`
+    : (runtime.error || '等待采样');
+  return `<div class="runtime-server-card">
+    <div class="runtime-server-head">
+      <div>
+        <div class="runtime-server-title">${escapeHtml(item.name || '—')}</div>
+        <div class="runtime-server-meta">${escapeHtml(subtitle)}</div>
+      </div>
+      <div>${runtimeBadge(runtime.status)}</div>
+    </div>
+    <div class="runtime-ring-grid">${buildRuntimeMetrics(item).map(renderRuntimeRing).join('')}</div>
+  </div>`;
+}
+
+function togglePortalRuntimeGpu(serverId) {
+  const key = String(serverId || '').trim();
+  if (!key) return;
+  PORTAL_RUNTIME_EXPANDED_GPU[key] = !PORTAL_RUNTIME_EXPANDED_GPU[key];
+  if (window.__portalRuntimePayload) {
+    renderRuntime(window.__portalRuntimePayload);
+  }
+}
+
+function renderRuntime(runtimePayload) {
+  window.__portalRuntimePayload = runtimePayload;
+  const summary = (runtimePayload && runtimePayload.summary) || {};
+  const servers = Array.isArray(runtimePayload && runtimePayload.servers) ? runtimePayload.servers : [];
+  document.getElementById('rt-online').textContent = `${summary.fresh_server_count || 0} / ${summary.server_count || 0}`;
+  document.getElementById('rt-idle').textContent = `${summary.idle_gpu_count || 0} / ${summary.total_gpu_count || 0}`;
+  document.getElementById('rt-tight').textContent = String(summary.tight_server_count || 0);
+  document.getElementById('rt-expired').textContent = String(summary.expired_server_count || 0);
+  document.getElementById('runtime-last-sample').textContent = summary.last_sample_at
+    ? `最近采样 ${formatDateTimeText(summary.last_sample_at)}`
+    : '暂无可用采样';
+  const container = document.getElementById('runtime-server-grid');
+  if (!servers.length) {
+    container.innerHTML = '<div class="card"><div class="empty">暂无 GPU 服务器运行状态。</div></div>';
+    return;
+  }
+  container.innerHTML = servers.map(renderRuntimeCard).join('');
+}
+
+document.addEventListener('click', event => {
+  const toggle = event.target.closest('[data-runtime-gpu-toggle]');
+  if (!toggle) return;
+  togglePortalRuntimeGpu(toggle.getAttribute('data-runtime-gpu-toggle'));
+});
 
 function renderChart(series, windowStart, windowEnd) {
   const container = document.getElementById('daily-chart');
@@ -351,9 +808,10 @@ function renderRanking(ranking) {
 }
 
 async function loadPortal() {
-  const [me, ranking] = await Promise.all([
+  const [me, ranking, runtime] = await Promise.all([
     portalApi(`/portal-api/me/${encodeURIComponent(PORTAL_TOKEN)}?days=30`),
-    portalApi(`/portal-api/ranking/${encodeURIComponent(PORTAL_TOKEN)}?days=30`)
+    portalApi(`/portal-api/ranking/${encodeURIComponent(PORTAL_TOKEN)}?days=30`),
+    portalApi(`/portal-api/runtime/${encodeURIComponent(PORTAL_TOKEN)}`)
   ]);
   if (!me.ok) {
     document.body.innerHTML = `<div class="wrap"><div class="panel"><div class="empty">${escapeHtml(me.error || '读取失败')}</div></div></div>`;
@@ -363,6 +821,7 @@ async function loadPortal() {
   document.getElementById('ov-rank').textContent = `${formatHours(me.me.weekly_gpu_card_hours || 0)} / ${formatHours(me.me.effective_quota_hours || 0)}`;
   document.getElementById('ov-quota').textContent = formatHours(me.me.weekly_over_quota_hours || 0);
   document.getElementById('ov-status').innerHTML = quotaBadge(me.me.quota_status);
+  renderRuntime(runtime);
   renderChart((me.daily && me.daily.series) || [], me.window_start, me.window_end);
   renderRanking((ranking && ranking.ranking) || []);
 }

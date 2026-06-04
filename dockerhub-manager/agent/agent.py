@@ -39,6 +39,14 @@ DEFAULT_EXTRA_PORT_COUNT = 5
 MAX_EXTRA_PORT_COUNT = 32
 DEFAULT_SSH_IMAGE = "lscr.io/linuxserver/openssh-server:latest"
 AGENT_VERSION = "0.4.0"
+HOST_STATUS_CPU_SAMPLE_SECONDS = 0.2
+HOST_STATUS_GPU_IDLE_UTIL_THRESHOLD = 15
+HOST_STATUS_GPU_IDLE_MEMORY_RATIO_THRESHOLD = 0.2
+host_status_cpu_lock = threading.Lock()
+host_status_cpu_sample = {
+    "total": None,
+    "idle": None,
+}
 
 # ── Token 鉴权 ───────────────────────────────────────────────────────────────
 def check_token():
@@ -773,6 +781,224 @@ def collect_storage_capabilities():
         "quota_flags": quota_flags,
         "reason": reason,
     }
+
+def read_meminfo_bytes():
+    values = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, raw_value = line.split(":", 1)
+                parts = raw_value.strip().split()
+                if not parts:
+                    continue
+                try:
+                    number = int(parts[0])
+                except ValueError:
+                    continue
+                values[key.strip()] = number * 1024
+    except OSError:
+        return {}
+    return values
+
+def safe_percent(used, total):
+    try:
+        used_value = float(used or 0.0)
+        total_value = float(total or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if total_value <= 0:
+        return 0.0
+    return round(max(0.0, min(100.0, used_value * 100.0 / total_value)), 2)
+
+def collect_memory_status():
+    meminfo = read_meminfo_bytes()
+    total_bytes = int(meminfo.get("MemTotal") or 0)
+    available_bytes = int(meminfo.get("MemAvailable") or 0)
+    if total_bytes > 0 and available_bytes <= 0:
+        available_bytes = max(
+            0,
+            int(meminfo.get("MemFree") or 0)
+            + int(meminfo.get("Buffers") or 0)
+            + int(meminfo.get("Cached") or 0)
+            + int(meminfo.get("SReclaimable") or 0)
+            - int(meminfo.get("Shmem") or 0),
+        )
+    used_bytes = max(0, total_bytes - available_bytes)
+    swap_total_bytes = int(meminfo.get("SwapTotal") or 0)
+    swap_free_bytes = int(meminfo.get("SwapFree") or 0)
+    swap_used_bytes = max(0, swap_total_bytes - swap_free_bytes)
+    return {
+        "total_bytes": total_bytes,
+        "available_bytes": available_bytes,
+        "used_bytes": used_bytes,
+        "usage_percent": safe_percent(used_bytes, total_bytes),
+        "swap_total_bytes": swap_total_bytes,
+        "swap_free_bytes": swap_free_bytes,
+        "swap_used_bytes": swap_used_bytes,
+        "swap_usage_percent": safe_percent(swap_used_bytes, swap_total_bytes),
+    }
+
+def read_cpu_totals():
+    try:
+        with open("/proc/stat", "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.startswith("cpu "):
+                    continue
+                parts = line.split()
+                values = [int(item) for item in parts[1:]]
+                if len(values) < 4:
+                    break
+                idle = values[3] + (values[4] if len(values) > 4 else 0)
+                total = sum(values)
+                return total, idle
+    except OSError:
+        return None, None
+    return None, None
+
+def collect_cpu_usage_percent():
+    def capture_delta(start_total, start_idle, end_total, end_idle):
+        if start_total is None or start_idle is None or end_total is None or end_idle is None:
+            return 0.0
+        total_delta = end_total - start_total
+        idle_delta = end_idle - start_idle
+        if total_delta <= 0:
+            return 0.0
+        usage = 100.0 * (1.0 - (float(idle_delta) / float(total_delta)))
+        return round(max(0.0, min(100.0, usage)), 2)
+
+    with host_status_cpu_lock:
+        current_total, current_idle = read_cpu_totals()
+        previous_total = host_status_cpu_sample.get("total")
+        previous_idle = host_status_cpu_sample.get("idle")
+        if previous_total is None or previous_idle is None or current_total is None or current_idle is None:
+            time.sleep(HOST_STATUS_CPU_SAMPLE_SECONDS)
+            next_total, next_idle = read_cpu_totals()
+            host_status_cpu_sample["total"] = next_total
+            host_status_cpu_sample["idle"] = next_idle
+            return capture_delta(current_total, current_idle, next_total, next_idle)
+        host_status_cpu_sample["total"] = current_total
+        host_status_cpu_sample["idle"] = current_idle
+        return capture_delta(previous_total, previous_idle, current_total, current_idle)
+
+def collect_load_average():
+    try:
+        load1, load5, load15 = os.getloadavg()
+        return {
+            "load1": round(load1, 2),
+            "load5": round(load5, 2),
+            "load15": round(load15, 2),
+        }
+    except OSError:
+        return {
+            "load1": 0.0,
+            "load5": 0.0,
+            "load15": 0.0,
+        }
+
+def resolve_mount_point(target_path):
+    target = Path(target_path or "/").resolve()
+    best_mount = None
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                mount_point = Path(decode_proc_mount_field(parts[1])).resolve()
+                try:
+                    target.relative_to(mount_point)
+                except ValueError:
+                    continue
+                if best_mount is None or len(str(mount_point)) > len(str(best_mount)):
+                    best_mount = mount_point
+    except OSError:
+        return str(target)
+    return str(best_mount or target)
+
+def collect_filesystem_usage(path, label=""):
+    requested_path = Path(path or "/")
+    probe_path = requested_path
+    while not probe_path.exists() and probe_path != probe_path.parent:
+        probe_path = probe_path.parent
+    if not probe_path.exists():
+        probe_path = Path("/")
+    usage = shutil.disk_usage(probe_path)
+    used_bytes = max(0, int(usage.total) - int(usage.free))
+    return {
+        "label": label or str(requested_path),
+        "path": str(requested_path),
+        "exists": requested_path.exists(),
+        "mount_point": resolve_mount_point(probe_path),
+        "used_bytes": used_bytes,
+        "total_bytes": int(usage.total),
+        "free_bytes": int(usage.free),
+        "usage_percent": safe_percent(used_bytes, int(usage.total)),
+    }
+
+def collect_registered_mount_root_usage(mount_roots):
+    entries = []
+    seen_mounts = set()
+    for root in normalize_roots(mount_roots):
+        entry = collect_filesystem_usage(root.get("host_path", "/"), label=root.get("host_path", "/"))
+        mount_key = str(entry.get("mount_point") or entry.get("path") or "")
+        if mount_key in seen_mounts:
+            continue
+        seen_mounts.add(mount_key)
+        entries.append(entry)
+    return entries
+
+def summarize_gpu_runtime(gpu_info):
+    devices = gpu_info.get("devices", []) if isinstance(gpu_info, dict) else []
+    summary_devices = []
+    active_device_count = 0
+    idle_device_count = 0
+    total_memory_bytes = 0
+    used_memory_bytes = 0
+    total_util_percent = 0.0
+    for device in devices:
+        total_bytes = int(device.get("memory_total_bytes") or 0)
+        used_bytes = int(device.get("memory_used_bytes") or 0)
+        util_percent = float(device.get("utilization_gpu") or 0.0)
+        memory_ratio = (float(used_bytes) / float(total_bytes)) if total_bytes > 0 else 0.0
+        idle = util_percent < HOST_STATUS_GPU_IDLE_UTIL_THRESHOLD and memory_ratio < HOST_STATUS_GPU_IDLE_MEMORY_RATIO_THRESHOLD
+        active = not idle and (util_percent > 0 or used_bytes > 0)
+        if active:
+            active_device_count += 1
+        if idle:
+            idle_device_count += 1
+        total_memory_bytes += total_bytes
+        used_memory_bytes += used_bytes
+        total_util_percent += util_percent
+        summary_devices.append({
+            "id": str(device.get("index", "")),
+            "name": str(device.get("name", "")),
+            "utilization_gpu": round(util_percent, 2),
+            "memory_used_bytes": used_bytes,
+            "memory_total_bytes": total_bytes,
+            "memory_usage_percent": safe_percent(used_bytes, total_bytes),
+            "active": active,
+            "idle": idle,
+        })
+    device_count = len(summary_devices)
+    return {
+        "supported": bool(gpu_info.get("supported")) if isinstance(gpu_info, dict) else False,
+        "device_count": device_count,
+        "active_device_count": active_device_count,
+        "idle_device_count": idle_device_count,
+        "total_memory_bytes": total_memory_bytes,
+        "used_memory_bytes": used_memory_bytes,
+        "avg_util_percent": round(total_util_percent / float(device_count), 2) if device_count else 0.0,
+        "devices": summary_devices,
+        "missing": list(gpu_info.get("missing", [])) if isinstance(gpu_info, dict) else [],
+    }
+
+def managed_container_count():
+    code, out, _ = run(["docker", "ps", "--filter", "label=manager=dockerhub", "--format", "{{.Names}}"], timeout=20)
+    if code != 0 or not out:
+        return 0
+    return len([line for line in out.splitlines() if line.strip()])
 
 SIZE_UNITS = {
     "b": 1,
@@ -2410,6 +2636,38 @@ def sysinfo():
 @auth_required
 def gpu_info():
     return jsonify(collect_gpu_info())
+
+@app.route("/host/status", methods=["GET", "POST"])
+@auth_required
+def host_status():
+    body = request.get_json(silent=True) or {}
+    docker_ok, docker_version = docker_available()
+    storage_caps = collect_storage_capabilities()
+    gpu_info = collect_gpu_info()
+    load_info = collect_load_average()
+    cpu_cores = os.cpu_count() or 1
+    memory = collect_memory_status()
+    docker_root_dir = storage_caps.get("docker_root_dir") or "/var/lib/docker"
+    return jsonify({
+        "ok": True,
+        "sampled_at": now(),
+        "docker_ok": docker_ok,
+        "docker_version": docker_version if docker_ok else "unavailable",
+        "cpu": {
+            "cores": cpu_cores,
+            "usage_percent": collect_cpu_usage_percent(),
+            **load_info,
+            "load_ratio": round(float(load_info.get("load1") or 0.0) / float(cpu_cores), 4) if cpu_cores > 0 else 0.0,
+        },
+        "memory": memory,
+        "gpu": summarize_gpu_runtime(gpu_info),
+        "storage": {
+            **storage_caps,
+            "docker_root": collect_filesystem_usage(docker_root_dir, label="DockerRootDir"),
+            "mount_roots": collect_registered_mount_root_usage(body.get("mount_roots", [])),
+        },
+        "managed_containers": managed_container_count(),
+    })
 
 @app.route("/checks", methods=["GET", "POST"])
 @auth_required

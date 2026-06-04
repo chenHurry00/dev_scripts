@@ -41,6 +41,7 @@ data_lock = threading.RLock()
 DATA_FILE = Path("data.json")
 APP_DIR = Path(__file__).resolve().parent
 GPU_ACCOUNTING_DB = APP_DIR / "gpu_accounting.db"
+SERVER_RUNTIME_CACHE_FILE = APP_DIR / "server_runtime_cache.json"
 SSH_PORT_MIN = 32000
 SSH_PORT_MAX = 32199
 EXTRA_PORT_MIN = 32200
@@ -62,10 +63,29 @@ GPU_ACCOUNTING_OVER_RATIO = 1.0
 GPU_ACCOUNTING_CRITICAL_RATIO = 1.2
 GPU_PORTAL_DEFAULT_DAYS = 30
 GPU_PORTAL_TOKEN_LENGTH = 16
+SERVER_RUNTIME_REFRESH_SECONDS = 10
+SERVER_RUNTIME_EXPIRE_SECONDS = 30
+SERVER_RUNTIME_CPU_WARN_PERCENT = 65
+SERVER_RUNTIME_CPU_DANGER_PERCENT = 85
+SERVER_RUNTIME_LOAD_WARN_RATIO = 1.0
+SERVER_RUNTIME_LOAD_DANGER_RATIO = 1.5
+SERVER_RUNTIME_MEM_WARN_PERCENT = 75
+SERVER_RUNTIME_MEM_DANGER_PERCENT = 90
+SERVER_RUNTIME_SWAP_WARN_PERCENT = 25
+SERVER_RUNTIME_SWAP_DANGER_PERCENT = 60
+SERVER_RUNTIME_STORAGE_WARN_FREE_PERCENT = 20
+SERVER_RUNTIME_STORAGE_DANGER_FREE_PERCENT = 10
+SERVER_RUNTIME_DOCKER_WARN_FREE_BYTES = 100 * 1024 * 1024 * 1024
+SERVER_RUNTIME_DOCKER_DANGER_FREE_BYTES = 50 * 1024 * 1024 * 1024
 gpu_accounting_db_lock = threading.RLock()
 gpu_accounting_runtime_lock = threading.RLock()
 gpu_accounting_worker_lock = threading.Lock()
 gpu_accounting_worker_started = False
+server_runtime_cache_lock = threading.RLock()
+server_runtime_cache_state = {
+    "loaded_at": 0.0,
+    "data": {},
+}
 gpu_accounting_runtime = {
     "device_states": {},
     "current_containers": {},
@@ -1282,6 +1302,391 @@ def build_gpu_portal_me_payload(data, username, days):
         "daily": daily,
     }
 
+def load_server_runtime_cache_data():
+    with server_runtime_cache_lock:
+        cached = server_runtime_cache_state.get("data") or {}
+        if cached and time.time() - float(server_runtime_cache_state.get("loaded_at") or 0.0) < 1.0:
+            return cached
+        if SERVER_RUNTIME_CACHE_FILE.exists():
+            try:
+                cached = json.loads(SERVER_RUNTIME_CACHE_FILE.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cached = {}
+        if not isinstance(cached, dict):
+            cached = {}
+        cached.setdefault("updated_at", "")
+        cached.setdefault("servers", {})
+        server_runtime_cache_state["data"] = cached
+        server_runtime_cache_state["loaded_at"] = time.time()
+        return cached
+
+def save_server_runtime_cache_data(payload):
+    content = json.dumps(payload, indent=2, ensure_ascii=False)
+    with server_runtime_cache_lock:
+        SERVER_RUNTIME_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = SERVER_RUNTIME_CACHE_FILE.with_name(
+            f".{SERVER_RUNTIME_CACHE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temp_file.write_text(content, encoding="utf-8")
+        os.replace(temp_file, SERVER_RUNTIME_CACHE_FILE)
+        server_runtime_cache_state["data"] = payload
+        server_runtime_cache_state["loaded_at"] = time.time()
+
+def is_server_runtime_cache_stale(payload, force=False):
+    if force:
+        return True
+    updated_at = parse_iso_datetime((payload or {}).get("updated_at"))
+    if updated_at is None:
+        return True
+    return (datetime.now() - updated_at).total_seconds() >= SERVER_RUNTIME_REFRESH_SECONDS
+
+def refresh_server_runtime_cache(data=None, force=False):
+    current_cache = load_server_runtime_cache_data()
+    if not is_server_runtime_cache_stale(current_cache, force=force):
+        return current_cache
+    dataset = data or load_data()
+    previous_servers = current_cache.get("servers") if isinstance(current_cache, dict) else {}
+    if not isinstance(previous_servers, dict):
+        previous_servers = {}
+    refreshed_at = iso_seconds(datetime.now())
+    servers_payload = {}
+    for sid, server in dataset.get("servers", {}).items():
+        previous_entry = previous_servers.get(sid) if isinstance(previous_servers.get(sid), dict) else {}
+        result = call_agent(
+            server,
+            "/host/status",
+            method="POST",
+            body={"mount_roots": server.get("mount_roots", [])},
+            timeout=20,
+        )
+        if result.get("status_code", 200) >= 400 or result.get("error"):
+            previous_data = previous_entry.get("data") if isinstance(previous_entry.get("data"), dict) else {}
+            last_ok_sampled_at = str(
+                previous_entry.get("last_ok_sampled_at")
+                or previous_data.get("sampled_at")
+                or ""
+            ).strip()
+            servers_payload[sid] = {
+                "ok": False,
+                "error": result.get("error") or f"Agent HTTP {result.get('status_code', 500)}",
+                "status_code": result.get("status_code", 500),
+                "fetched_at": refreshed_at,
+                "last_ok_sampled_at": last_ok_sampled_at,
+                "data": previous_data,
+            }
+            continue
+        sampled_at = str(result.get("sampled_at") or refreshed_at).strip() or refreshed_at
+        servers_payload[sid] = {
+            "ok": True,
+            "error": "",
+            "status_code": result.get("status_code", 200),
+            "fetched_at": refreshed_at,
+            "last_ok_sampled_at": sampled_at,
+            "data": result,
+        }
+    payload = {
+        "updated_at": refreshed_at,
+        "servers": servers_payload,
+    }
+    save_server_runtime_cache_data(payload)
+    return payload
+
+def get_server_runtime_cache(data=None, force=False):
+    payload = load_server_runtime_cache_data()
+    dataset = data or load_data()
+    cache_servers = payload.get("servers") if isinstance(payload.get("servers"), dict) else {}
+    missing_server = any(sid not in cache_servers for sid in dataset.get("servers", {}).keys())
+    if missing_server or is_server_runtime_cache_stale(payload, force=force):
+        return refresh_server_runtime_cache(data=dataset, force=force)
+    return payload
+
+def runtime_state_rank(state):
+    return {
+        "ok": 0,
+        "warn": 1,
+        "danger": 2,
+    }.get(str(state or "ok"), 0)
+
+def runtime_worst_state(*states):
+    normalized = [str(item or "ok") for item in states]
+    if not normalized:
+        return "ok"
+    return max(normalized, key=runtime_state_rank)
+
+def runtime_percent_state(value, warn_threshold, danger_threshold):
+    number = usage_percent(value)
+    if number >= danger_threshold:
+        return "danger"
+    if number >= warn_threshold:
+        return "warn"
+    return "ok"
+
+def runtime_storage_state(entry, is_docker=False):
+    if not isinstance(entry, dict):
+        return "ok"
+    total_bytes = clamp_int(entry.get("total_bytes"), 0, minimum=0)
+    free_bytes = clamp_int(entry.get("free_bytes"), 0, minimum=0)
+    if total_bytes <= 0:
+        return "ok"
+    free_percent = usage_percent((float(free_bytes) / float(total_bytes)) * 100.0)
+    if free_percent < SERVER_RUNTIME_STORAGE_DANGER_FREE_PERCENT:
+        return "danger"
+    if free_percent < SERVER_RUNTIME_STORAGE_WARN_FREE_PERCENT:
+        return "warn"
+    if is_docker and free_bytes < SERVER_RUNTIME_DOCKER_DANGER_FREE_BYTES:
+        return "danger"
+    if is_docker and free_bytes < SERVER_RUNTIME_DOCKER_WARN_FREE_BYTES:
+        return "warn"
+    return "ok"
+
+def runtime_status_text(status):
+    mapping = {
+        "trainable": "可训练",
+        "tight": "资源紧张",
+        "expired": "状态过期",
+    }
+    return mapping.get(str(status or ""), "状态过期")
+
+def build_runtime_storage_entry_view(entry, state, include_sensitive=True):
+    label = str(entry.get("label") or "").strip()
+    if not include_sensitive and label.startswith("/"):
+        label = ""
+    item = {
+        "label": label,
+        "exists": bool(entry.get("exists", True)),
+        "used_bytes": clamp_int(entry.get("used_bytes"), 0, minimum=0),
+        "total_bytes": clamp_int(entry.get("total_bytes"), 0, minimum=0),
+        "free_bytes": clamp_int(entry.get("free_bytes"), 0, minimum=0),
+        "usage_percent": usage_percent(entry.get("usage_percent", 0)),
+        "free_percent": usage_percent(100.0 - float(entry.get("usage_percent", 0) or 0.0)),
+        "state": state,
+    }
+    if include_sensitive:
+        item["path"] = str(entry.get("path") or "")
+        item["mount_point"] = str(entry.get("mount_point") or "")
+    return item
+
+def build_workspace_storage_summary(entries):
+    if not entries:
+        return {
+            "count": 0,
+            "state": "ok",
+            "used_bytes": 0,
+            "total_bytes": 0,
+            "free_bytes": 0,
+            "usage_percent": 0.0,
+            "free_percent": 0.0,
+        }
+    worst_entry = max(entries, key=lambda item: runtime_state_rank(item.get("state")))
+    return {
+        "count": len(entries),
+        "state": worst_entry.get("state", "ok"),
+        "used_bytes": clamp_int(worst_entry.get("used_bytes"), 0, minimum=0),
+        "total_bytes": clamp_int(worst_entry.get("total_bytes"), 0, minimum=0),
+        "free_bytes": clamp_int(worst_entry.get("free_bytes"), 0, minimum=0),
+        "usage_percent": usage_percent(worst_entry.get("usage_percent", 0)),
+        "free_percent": usage_percent(worst_entry.get("free_percent", 0)),
+    }
+
+def build_server_runtime_view(server, raw_entry, include_sensitive=True):
+    raw_entry = raw_entry if isinstance(raw_entry, dict) else {}
+    raw_data = raw_entry.get("data") if isinstance(raw_entry.get("data"), dict) else {}
+    sampled_at = str(
+        raw_data.get("sampled_at")
+        or raw_entry.get("last_ok_sampled_at")
+        or ""
+    ).strip()
+    sampled_dt = parse_iso_datetime(sampled_at)
+    age_seconds = None
+    if sampled_dt is not None:
+        age_seconds = round(max(0.0, (datetime.now() - sampled_dt).total_seconds()), 2)
+    expired = (
+        not raw_entry.get("ok", False)
+        or sampled_dt is None
+        or age_seconds is None
+        or age_seconds > SERVER_RUNTIME_EXPIRE_SECONDS
+    )
+
+    cpu_data = raw_data.get("cpu", {}) if isinstance(raw_data.get("cpu"), dict) else {}
+    cpu_cores = clamp_int(cpu_data.get("cores"), 0, minimum=0)
+    cpu_usage_percent_value = usage_percent(cpu_data.get("usage_percent", 0))
+    cpu_load1 = usage_percent(cpu_data.get("load1", 0))
+    cpu_load5 = usage_percent(cpu_data.get("load5", 0))
+    cpu_load15 = usage_percent(cpu_data.get("load15", 0))
+    cpu_load_ratio = float(cpu_data.get("load_ratio") or (float(cpu_load1) / float(cpu_cores) if cpu_cores else 0.0))
+    cpu_state = runtime_percent_state(
+        cpu_usage_percent_value,
+        SERVER_RUNTIME_CPU_WARN_PERCENT,
+        SERVER_RUNTIME_CPU_DANGER_PERCENT,
+    )
+    if cpu_load_ratio >= SERVER_RUNTIME_LOAD_DANGER_RATIO:
+        cpu_state = runtime_worst_state(cpu_state, "danger")
+    elif cpu_load_ratio >= SERVER_RUNTIME_LOAD_WARN_RATIO:
+        cpu_state = runtime_worst_state(cpu_state, "warn")
+
+    memory_data = raw_data.get("memory", {}) if isinstance(raw_data.get("memory"), dict) else {}
+    memory_used_bytes = clamp_int(memory_data.get("used_bytes"), 0, minimum=0)
+    memory_total_bytes = clamp_int(memory_data.get("total_bytes"), 0, minimum=0)
+    memory_available_bytes = clamp_int(memory_data.get("available_bytes"), 0, minimum=0)
+    memory_usage_percent_value = usage_percent(memory_data.get("usage_percent", 0))
+    memory_state = runtime_percent_state(
+        memory_usage_percent_value,
+        SERVER_RUNTIME_MEM_WARN_PERCENT,
+        SERVER_RUNTIME_MEM_DANGER_PERCENT,
+    )
+    swap_total_bytes = clamp_int(memory_data.get("swap_total_bytes"), 0, minimum=0)
+    swap_used_bytes = clamp_int(memory_data.get("swap_used_bytes"), 0, minimum=0)
+    swap_free_bytes = clamp_int(memory_data.get("swap_free_bytes"), 0, minimum=0)
+    swap_usage_percent_value = usage_percent(memory_data.get("swap_usage_percent", 0))
+    swap_state = "ok"
+    if swap_total_bytes > 0:
+        swap_state = runtime_percent_state(
+            swap_usage_percent_value,
+            SERVER_RUNTIME_SWAP_WARN_PERCENT,
+            SERVER_RUNTIME_SWAP_DANGER_PERCENT,
+        )
+    memory_overall_state = runtime_worst_state(memory_state, swap_state)
+
+    gpu_data = raw_data.get("gpu", {}) if isinstance(raw_data.get("gpu"), dict) else {}
+    gpu_devices = []
+    for item in gpu_data.get("devices", []) if isinstance(gpu_data.get("devices"), list) else []:
+        gpu_devices.append({
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or ""),
+            "utilization_gpu": usage_percent(item.get("utilization_gpu", 0)),
+            "memory_used_bytes": clamp_int(item.get("memory_used_bytes"), 0, minimum=0),
+            "memory_total_bytes": clamp_int(item.get("memory_total_bytes"), 0, minimum=0),
+            "memory_usage_percent": usage_percent(item.get("memory_usage_percent", 0)),
+            "active": bool(item.get("active", False)),
+            "idle": bool(item.get("idle", False)),
+        })
+    gpu_device_count = clamp_int(gpu_data.get("device_count"), len(gpu_devices), minimum=0)
+    gpu_active_device_count = clamp_int(gpu_data.get("active_device_count"), 0, minimum=0)
+    gpu_idle_device_count = clamp_int(gpu_data.get("idle_device_count"), 0, minimum=0)
+    gpu_used_memory_bytes = clamp_int(gpu_data.get("used_memory_bytes"), 0, minimum=0)
+    gpu_total_memory_bytes = clamp_int(gpu_data.get("total_memory_bytes"), 0, minimum=0)
+    gpu_avg_util_percent = usage_percent(gpu_data.get("avg_util_percent", 0))
+    gpu_state = "ok"
+    if gpu_device_count > 0 and gpu_idle_device_count == 0:
+        gpu_state = "danger"
+    elif gpu_device_count > 0 and gpu_idle_device_count <= max(1, gpu_device_count // 4):
+        gpu_state = "warn"
+
+    storage_data = raw_data.get("storage", {}) if isinstance(raw_data.get("storage"), dict) else {}
+    docker_root_raw = storage_data.get("docker_root", {}) if isinstance(storage_data.get("docker_root"), dict) else {}
+    docker_root_state = runtime_storage_state(docker_root_raw, is_docker=True)
+    docker_root = build_runtime_storage_entry_view(docker_root_raw, docker_root_state, include_sensitive=include_sensitive)
+    mount_root_entries = []
+    for item in storage_data.get("mount_roots", []) if isinstance(storage_data.get("mount_roots"), list) else []:
+        entry_state = runtime_storage_state(item, is_docker=False)
+        mount_root_entries.append(build_runtime_storage_entry_view(item, entry_state, include_sensitive=include_sensitive))
+    workspace_summary = build_workspace_storage_summary(mount_root_entries)
+    storage_state = runtime_worst_state(docker_root_state, workspace_summary.get("state", "ok"))
+
+    runtime_status = "expired"
+    if not expired:
+        has_free_gpu = gpu_device_count == 0 or gpu_idle_device_count > 0
+        if (
+            cpu_state != "danger"
+            and memory_overall_state != "danger"
+            and storage_state != "danger"
+            and has_free_gpu
+        ):
+            runtime_status = "trainable"
+        else:
+            runtime_status = "tight"
+
+    return {
+        "status": runtime_status,
+        "status_text": runtime_status_text(runtime_status),
+        "sampled_at": sampled_at,
+        "age_seconds": age_seconds,
+        "fresh": runtime_status != "expired",
+        "error": str(raw_entry.get("error") or "").strip(),
+        "managed_containers": clamp_int(raw_data.get("managed_containers"), 0, minimum=0),
+        "docker_ok": bool(raw_data.get("docker_ok", False)),
+        "cpu": {
+            "cores": cpu_cores,
+            "usage_percent": cpu_usage_percent_value,
+            "load1": cpu_load1,
+            "load5": cpu_load5,
+            "load15": cpu_load15,
+            "load_ratio": usage_percent(cpu_load_ratio * 100.0),
+            "state": cpu_state,
+        },
+        "memory": {
+            "used_bytes": memory_used_bytes,
+            "total_bytes": memory_total_bytes,
+            "available_bytes": memory_available_bytes,
+            "usage_percent": memory_usage_percent_value,
+            "state": memory_state,
+            "overall_state": memory_overall_state,
+            "swap_used_bytes": swap_used_bytes,
+            "swap_total_bytes": swap_total_bytes,
+            "swap_free_bytes": swap_free_bytes,
+            "swap_usage_percent": swap_usage_percent_value,
+            "swap_state": swap_state,
+        },
+        "gpu": {
+            "supported": bool(gpu_data.get("supported", False)),
+            "device_count": gpu_device_count,
+            "active_device_count": gpu_active_device_count,
+            "idle_device_count": gpu_idle_device_count,
+            "used_memory_bytes": gpu_used_memory_bytes,
+            "total_memory_bytes": gpu_total_memory_bytes,
+            "avg_util_percent": gpu_avg_util_percent,
+            "state": gpu_state,
+            "devices": gpu_devices,
+            "missing": list(gpu_data.get("missing", [])) if isinstance(gpu_data.get("missing"), list) else [],
+        },
+        "storage": {
+            "driver": str(storage_data.get("driver") or ""),
+            "backing_filesystem": str(storage_data.get("backing_filesystem") or ""),
+            "docker_root": docker_root,
+            "mount_roots": mount_root_entries,
+            "workspace": workspace_summary,
+            "state": storage_state,
+            "supports_rootfs_limit": bool(storage_data.get("supports_rootfs_limit", False)),
+        },
+    }
+
+def build_server_runtime_summary_payload(data=None, include_sensitive=True, gpu_only=False, force=False):
+    dataset = data or load_data()
+    cache = get_server_runtime_cache(dataset, force=force)
+    cache_servers = cache.get("servers") if isinstance(cache.get("servers"), dict) else {}
+    items = []
+    for sid, server in dataset.get("servers", {}).items():
+        runtime = build_server_runtime_view(server, cache_servers.get(sid), include_sensitive=include_sensitive)
+        if gpu_only and clamp_int(runtime.get("gpu", {}).get("device_count"), 0, minimum=0) <= 0:
+            continue
+        items.append({
+            "id": sid,
+            "name": server.get("name", sid),
+            "runtime": runtime,
+        })
+    last_sample_at = ""
+    for item in items:
+        sampled_at = str(item.get("runtime", {}).get("sampled_at") or "").strip()
+        if sampled_at and sampled_at > last_sample_at:
+            last_sample_at = sampled_at
+    summary = {
+        "server_count": len(items),
+        "fresh_server_count": len([item for item in items if item.get("runtime", {}).get("fresh")]),
+        "trainable_server_count": len([item for item in items if item.get("runtime", {}).get("status") == "trainable"]),
+        "tight_server_count": len([item for item in items if item.get("runtime", {}).get("status") == "tight"]),
+        "expired_server_count": len([item for item in items if item.get("runtime", {}).get("status") == "expired"]),
+        "gpu_server_count": len([item for item in items if clamp_int(item.get("runtime", {}).get("gpu", {}).get("device_count"), 0, minimum=0) > 0]),
+        "total_gpu_count": sum(clamp_int(item.get("runtime", {}).get("gpu", {}).get("device_count"), 0, minimum=0) for item in items),
+        "idle_gpu_count": sum(clamp_int(item.get("runtime", {}).get("gpu", {}).get("idle_device_count"), 0, minimum=0) for item in items),
+        "last_sample_at": last_sample_at,
+    }
+    return {
+        "ok": True,
+        "updated_at": str(cache.get("updated_at") or ""),
+        "summary": summary,
+        "servers": items,
+    }
+
 @app.errorhandler(Exception)
 def handle_exception(exc):
     if isinstance(exc, HTTPException):
@@ -2015,6 +2420,12 @@ def dashboard():
 @login_required
 def api_servers():
     data = load_data()
+    runtime_payload = build_server_runtime_summary_payload(data=data, include_sensitive=True)
+    runtime_map = {
+        item.get("id"): item.get("runtime")
+        for item in runtime_payload.get("servers", [])
+        if isinstance(item, dict)
+    }
     servers = []
     for sid, srv in data["servers"].items():
         checks = call_agent(srv, "/checks", method="POST", body={"mount_roots": srv.get("mount_roots", [])}, timeout=5)
@@ -2030,9 +2441,16 @@ def api_servers():
             "checks": checks,
             "status": status,
             "containers": len([c for c in data["containers"].values()
-                                if c.get("server_id") == sid])
+                                if c.get("server_id") == sid]),
+            "runtime": runtime_map.get(sid, {}),
         })
     return jsonify({"servers": servers})
+
+@app.route("/api/server-runtime-summary", methods=["GET"])
+@login_required
+def api_server_runtime_summary():
+    data = load_data()
+    return jsonify(build_server_runtime_summary_payload(data=data, include_sensitive=True))
 
 @app.route("/api/servers", methods=["POST"])
 @login_required
@@ -2719,6 +3137,15 @@ def api_gpu_usage_portal_ranking(token):
         "retention_days": ensure_gpu_accounting_defaults(data).get("retention_days", GPU_ACCOUNTING_DEFAULT_RETENTION_DAYS),
         "ranking": masked_ranking,
     })
+
+@app.route("/portal-api/runtime/<token>", methods=["GET"])
+@portal_mode_required
+def api_gpu_usage_portal_runtime(token):
+    data = load_data()
+    viewer_username, _ = get_gpu_portal_user_by_token(data, token)
+    if not viewer_username:
+        return jsonify({"ok": False, "error": "访问链接无效或已失效"}), 404
+    return jsonify(build_server_runtime_summary_payload(data=data, include_sensitive=False, gpu_only=True))
 
 @app.route("/api/gpu-accounting/settings", methods=["PATCH"])
 @login_required
