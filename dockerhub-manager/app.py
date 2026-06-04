@@ -252,11 +252,25 @@ def normalize_audit_log_entry(entry):
     item["operator_role"] = str(item.get("operator_role") or "")
     return item
 
+def should_hide_audit_log_entry(entry):
+    item = normalize_audit_log_entry(entry)
+    message = item["message"]
+    return (
+        "重建容器 " in message
+        and "来源 temporary_snapshot" in message
+    )
+
 def can_manage_users():
     return str(session.get("role") or "").strip() == "admin"
 
 def can_create_admin_user():
     return can_manage_users() and str(session.get("user") or "").strip() == "admin"
+
+def can_view_system_admin_user():
+    return can_manage_users() and str(session.get("user") or "").strip() == "admin"
+
+def can_view_system_admin_audit():
+    return can_view_system_admin_user()
 
 def migrate_empty_server_id(data):
     """迁移旧版允许保存的空服务器 ID，避免前端下拉框与未选择状态冲突。"""
@@ -3790,10 +3804,11 @@ def api_rebuild_container(cid):
         if result.get("image_mode"):
             container["image_mode"] = result.get("image_mode")
         source_suffix = f" / {payload['image_ref']}" if payload.get("image_ref") else ""
-        append_audit(
-            data,
-            f"重建容器 {container.get('name', cid)}，来源 {payload['source_type']}{source_suffix}"
-        )
+        if payload["source_type"] != "temporary_snapshot":
+            append_audit(
+                data,
+                f"重建容器 {container.get('name', cid)}，来源 {payload['source_type']}{source_suffix}"
+            )
         save_data(data)
     return jsonify(result)
 
@@ -3803,8 +3818,15 @@ def api_rebuild_container(cid):
 @role_required("admin")
 def api_users():
     data = load_data()
-    users = [{"username": u, "role": v["role"], "created_at": v.get("created_at", "")}
-             for u, v in data["users"].items()]
+    users = []
+    for username, details in data["users"].items():
+        if username == "admin" and not can_view_system_admin_user():
+            continue
+        users.append({
+            "username": username,
+            "role": details["role"],
+            "created_at": details.get("created_at", ""),
+        })
     return jsonify({"users": users})
 
 @app.route("/api/users", methods=["POST"])
@@ -3856,7 +3878,13 @@ def api_logs():
     logs = [
         normalize_audit_log_entry(item)
         for item in data.get("audit_logs", [])[-AUDIT_LOG_LIMIT:]
+        if not should_hide_audit_log_entry(item)
     ]
+    if not can_view_system_admin_audit():
+        logs = [
+            item for item in logs
+            if (operator := str(item.get("operator") or "").strip()) and operator != "admin"
+        ]
     return jsonify({"logs": logs})
 
 # ── 当前用户信息 ───────────────────────────────────────────────────────────

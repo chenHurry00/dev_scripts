@@ -6492,10 +6492,9 @@ async function loadAuditLogs() {
     logs.forEach(d => {
       const type = d.level === 'WARN' ? 'warn' : d.level === 'ERR' ? 'danger' : 'info';
       const operator = escapeHtml(d.operator || '未知');
-      const operatorRole = escapeHtml(d.operator_role || '—');
       const line = document.createElement('div');
       line.className = 'log-line';
-      line.innerHTML = `<span class="log-time">${escapeHtml((d.time || '').slice(11, 19))}</span><span class="log-operator">${operator}<span class="log-operator-role">/${operatorRole}</span></span><span class="log-msg ${type}">[${escapeHtml(d.level)}] ${escapeHtml(d.message)}</span>`;
+      line.innerHTML = `<span class="log-time">${escapeHtml((d.time || '').slice(11, 19))}</span><span class="log-operator">${operator}</span><span class="log-msg ${type}">[${escapeHtml(d.level)}] ${escapeHtml(d.message)}</span>`;
       body.appendChild(line);
     });
     body.scrollTop = body.scrollHeight;
