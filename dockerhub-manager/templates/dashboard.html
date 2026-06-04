@@ -3234,6 +3234,22 @@ function isMobileLayout() {
   return window.innerWidth <= 760;
 }
 
+function canCreateAdminUser() {
+  return STATE.role === 'admin' && STATE.user === 'admin';
+}
+
+function syncUserRoleOptions() {
+  const select = document.getElementById('usr-role');
+  if (!select) return;
+  const adminOption = Array.from(select.options).find(option => option.value === 'admin');
+  if (!adminOption) return;
+  adminOption.hidden = !canCreateAdminUser();
+  adminOption.disabled = !canCreateAdminUser();
+  if (!canCreateAdminUser() && select.value === 'admin') {
+    select.value = 'allocator';
+  }
+}
+
 function openSidebar() {
   document.body.classList.add('sidebar-open');
 }
@@ -3285,6 +3301,7 @@ updateClock();
     const userPanel = document.getElementById('panel-users');
     if (userPanel) userPanel.style.display = 'none';
   }
+  syncUserRoleOptions();
 })();
 
 /* ═══════════════════════════════════════════════
@@ -3326,9 +3343,20 @@ function isServersPanelActive() {
 /* ═══════════════════════════════════════════════
    MODAL
 ═══════════════════════════════════════════════ */
-function openModal(id) { document.getElementById(id).classList.add('open'); }
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+  if (id === 'modal-add-usr') {
+    syncUserRoleOptions();
+  }
+}
 function closeModal(id) {
   document.getElementById(id).classList.remove('open');
+  if (id === 'modal-add-usr') {
+    document.getElementById('usr-name').value = '';
+    document.getElementById('usr-pass').value = '';
+    document.getElementById('usr-role').value = 'allocator';
+    syncUserRoleOptions();
+  }
   if (id === 'modal-import-config') {
     const input = document.getElementById('cfg-import-file');
     if (input) input.value = '';
@@ -6214,10 +6242,21 @@ async function delServer(id) {
 
 async function addUser() {
   const body = {
-    username: document.getElementById('usr-name').value,
+    username: document.getElementById('usr-name').value.trim(),
     password: document.getElementById('usr-pass').value,
     role:     document.getElementById('usr-role').value
   };
+  if (!body.username) {
+    toast('请先填写用户名', 'warn');
+    return;
+  }
+  if (body.password.length < 8) {
+    toast('初始密码至少需要 8 位', 'warn');
+    return;
+  }
+  if (body.role === 'admin' && !canCreateAdminUser()) {
+    body.role = 'allocator';
+  }
   const res = await api('/api/users', { method: 'POST', body: JSON.stringify(body) });
   if (res.ok) {
     toast('用户添加成功', 'ok');

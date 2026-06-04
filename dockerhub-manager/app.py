@@ -255,6 +255,9 @@ def normalize_audit_log_entry(entry):
 def can_manage_users():
     return str(session.get("role") or "").strip() == "admin"
 
+def can_create_admin_user():
+    return can_manage_users() and str(session.get("user") or "").strip() == "admin"
+
 def migrate_empty_server_id(data):
     """迁移旧版允许保存的空服务器 ID，避免前端下拉框与未选择状态冲突。"""
     if "" not in data["servers"]:
@@ -3816,6 +3819,8 @@ def api_add_user():
         return jsonify({"error": "密码至少需要 8 位"}), 400
     if role not in ("admin", "allocator"):
         return jsonify({"error": "角色无效"}), 400
+    if role == "admin" and not can_create_admin_user():
+        return jsonify({"error": "只有系统 admin 账号可以创建管理员用户"}), 403
     with data_lock:
         data = load_data()
         if not uname or uname in data["users"]:
@@ -3823,7 +3828,8 @@ def api_add_user():
         data["users"][uname] = {
             "password": generate_password_hash(password),
             "role": role,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "created_by": session["user"],
         }
         append_audit(data, f"添加平台用户 {uname}")
         save_data(data)
