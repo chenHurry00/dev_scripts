@@ -3917,24 +3917,25 @@ def api_config_import():
 def register_panel_access_routes():
     if not panel_access_token_enabled():
         return
-    existing_rules = {rule.rule for rule in app.url_map.iter_rules()}
-    for rule in list(app.url_map.iter_rules()):
+    existing_aliases = set()
+    for index, rule in enumerate(list(app.url_map.iter_rules())):
         if rule.endpoint == "static":
             continue
         if not is_panel_guarded_path(rule.rule):
             continue
         token_rule = panel_path(rule.rule)
-        if token_rule in existing_rules:
+        methods = tuple(sorted(method for method in rule.methods if method not in {"HEAD", "OPTIONS"}))
+        alias_key = (token_rule, rule.endpoint, methods)
+        if alias_key in existing_aliases:
             continue
-        methods = sorted(method for method in rule.methods if method not in {"HEAD", "OPTIONS"})
         app.add_url_rule(
             token_rule,
-            endpoint=f"{rule.endpoint}__panel_access__{len(existing_rules)}",
+            endpoint=f"{rule.endpoint}__panel_access__{index}",
             view_func=app.view_functions[rule.endpoint],
             defaults=rule.defaults,
-            methods=methods or None,
+            methods=list(methods) or None,
         )
-        existing_rules.add(token_rule)
+        existing_aliases.add(alias_key)
 
 register_panel_access_routes()
 

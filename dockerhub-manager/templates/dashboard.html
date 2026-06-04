@@ -3753,11 +3753,54 @@ function panelPath(path) {
 }
 
 async function api(url, opts = {}) {
-  const r = await fetch(panelPath(url), {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts
-  });
-  return r.json();
+  let response;
+  try {
+    response = await fetch(panelPath(url), {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      status_code: 0,
+      error: error.message || '网络请求失败'
+    };
+  }
+
+  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+  let payload = null;
+  if (contentType.includes('application/json')) {
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+  } else {
+    const rawText = await response.text();
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch (error) {
+        payload = {
+          error: rawText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() || `HTTP ${response.status}`
+        };
+      }
+    }
+  }
+
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    payload = {};
+  }
+  if (typeof payload.ok !== 'boolean') {
+    payload.ok = response.ok;
+  }
+  if (!payload.error && !response.ok) {
+    payload.error = `请求失败：HTTP ${response.status}`;
+  }
+  if (!payload.status_code) {
+    payload.status_code = response.status;
+  }
+  return payload;
 }
 
 function formatFilenameTimestamp(date = new Date()) {
