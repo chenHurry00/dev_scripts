@@ -78,12 +78,21 @@ bash scripts/panel_manager.sh
 将面板安装到隐藏目录 /opt/.dockerhub-panel
 创建独立 Python 虚拟环境
 生成并保存 SECRET_KEY
+生成并保存 16 位 PANEL_ACCESS_TOKEN
 提示输入并确认 admin 管理员密码
 注册 dockerhub-panel.service
 使用单进程、少线程 Gunicorn 运行面板
 设置开机自启并启动服务
 询问是否同时部署本机 Docker 管理 Agent
 ```
+
+安装或更新完成后，脚本会直接输出面板访问入口，格式为：
+
+```text
+http://<中心服务器IP>:5000/<16位token>/dashboard
+```
+
+该 token 默认长期保持不变。后续执行安装/更新时会沿用现有 token，除非主动执行重置。
 
 再次运行同一个脚本，可以更新、重启面板、查看状态、查看日志或停止面板。更新面板时会覆盖程序文件，但保留 `/opt/.dockerhub-panel/data.json`。检测到已有 `/etc/dockerhub-manager/panel.env` 时，脚本会先询问：
 
@@ -100,6 +109,7 @@ Existing panel configuration detected. Modify it? [y/N]:
 ```bash
 bash scripts/panel_manager.sh update
 bash scripts/panel_manager.sh restart
+bash scripts/panel_manager.sh reset-panel-token
 bash scripts/panel_manager.sh status
 bash scripts/panel_manager.sh logs
 bash scripts/panel_manager.sh uninstall
@@ -149,12 +159,12 @@ bash scripts/panel_manager.sh install-docs
 菜单模式下也可以选择：
 
 ```text
-12. 安装/更新文档站
-13. 重启文档站
-14. 查看文档站状态
-15. 查看文档站日志
-16. 停止文档站并取消开机启动（保留数据）
-17. 卸载文档站
+13. 安装/更新文档站
+14. 重启文档站
+15. 查看文档站状态
+16. 查看文档站日志
+17. 停止文档站并取消开机启动（保留数据）
+18. 卸载文档站
 ```
 
 文档站默认访问地址：
@@ -186,7 +196,7 @@ bash scripts/panel_manager.sh update
 在菜单中选择：
 
 ```text
-6. 卸载中心面板
+7. 卸载中心面板
 ```
 
 或直接执行：
@@ -219,7 +229,7 @@ bash scripts/panel_manager.sh uninstall
 局域网内其他管理员电脑访问：
 
 ```text
-http://192.168.1.20:5000
+http://192.168.1.20:5000/<16位token>/dashboard
 ```
 
 如启用 GPU 用量对外门户，访问格式为：
@@ -236,7 +246,19 @@ http://192.168.1.20:5003
 
 门户为只读页面，不提供管理操作。每个业务用户对应独立 token 链接，可在管理界面的 `GPU计算时` 页面中复制、重置或导出 CSV 链接表。
 
-只有在中心服务器本机打开浏览器时才使用 `http://localhost:5000`。
+只有在中心服务器本机打开浏览器时才使用：
+
+```text
+http://localhost:5000/<16位token>/dashboard
+```
+
+如需主动重置 5000 面板访问 token，可执行：
+
+```bash
+bash scripts/panel_manager.sh reset-panel-token
+```
+
+该命令会生成新的 16 位 token，写回 `/etc/dockerhub-manager/panel.env`，重启面板服务，并输出新的访问地址。旧链接会立即失效。
 
 未设置 `ADMIN_PASSWORD` 时的开发环境默认账号：
 
@@ -342,7 +364,7 @@ bash scripts/panel_manager.sh
 选择：
 
 ```text
-7. 安装/更新本机 Agent
+8. 安装/更新本机 Agent
 ```
 
 更新已存在的本机 Agent 时，脚本也会先询问：
@@ -365,7 +387,7 @@ Agent Token：脚本输出的 Token
 
 面板通过 `127.0.0.1` 访问本机 Agent，因此无需为本机 Agent API 对外放行 `5001`。如需让其他机器 SSH 登录本机创建的容器，仍需在中心服务器上按可信来源放行 `TCP 32000-32999`。
 
-卸载本机 Agent 时，选择菜单中的 `11. 卸载本机 Agent` 或执行：
+卸载本机 Agent 时，选择菜单中的 `12. 卸载本机 Agent` 或执行：
 
 ```bash
 bash scripts/panel_manager.sh uninstall-local-agent
@@ -772,6 +794,7 @@ Agent Token 未改变
 | `ADMIN_PASSWORD` | 手工启动时，首次生成 `data.json` 前使用的管理员密码 | `admin123` |
 | `ADMIN_PASSWORD_B64` | 管理脚本使用的 Base64 初始管理员密码，优先于 `ADMIN_PASSWORD` | 空 |
 | `PANEL_PORT` | 中心面板监听端口 | `5000` |
+| `PANEL_ACCESS_TOKEN` | 面板访问前缀 token，长度固定为 16 位；面板访问路径为 `/<token>/dashboard` | 自动生成 |
 | `DEBUG` | Flask 调试模式，仅开发时设置为 `1` | `0` |
 
 ### Agent
