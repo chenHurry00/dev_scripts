@@ -1038,8 +1038,42 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
   gap: 8px;
 }
 
+.container-ssh-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
 .container-ssh-command {
   font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.container-copy-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-mid);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.container-copy-btn:hover {
+  color: var(--accent);
+  border-color: #00d4ff55;
+  background: rgba(0, 212, 255, 0.08);
+}
+
+.container-copy-btn:active {
+  transform: translateY(1px);
 }
 
 .container-port-list {
@@ -4214,10 +4248,54 @@ function renderContainerPortMappings(container, metric) {
   return `<div class="container-port-list">${badges.join('')}</div>`;
 }
 
+function getContainerConnectionCopyText(container) {
+  const existing = String(container.connection_copy_text || '').trim();
+  if (existing) {
+    return existing;
+  }
+  const lines = [];
+  const sshCmd = String(container.ssh_cmd || '').trim();
+  if (sshCmd) {
+    lines.push(sshCmd);
+  }
+  const portRules = Array.isArray(container.port_rules) ? container.port_rules.map(item => String(item || '').trim()).filter(Boolean) : [];
+  if (portRules.length) {
+    if (lines.length) {
+      lines.push('');
+    }
+    lines.push('# 端口映射');
+    lines.push(...portRules);
+  }
+  return lines.join('\n').trim();
+}
+
+async function copyContainerConnection(containerId) {
+  const container = STATE.containers.find(item => item.id === containerId);
+  if (!container) {
+    toast('未找到容器连接信息', 'warn');
+    return;
+  }
+  const text = getContainerConnectionCopyText(container);
+  if (!text) {
+    toast('当前没有可复制的连接信息', 'warn');
+    return;
+  }
+  try {
+    await copyText(text);
+    toast('连接信息已复制', 'ok');
+  } catch (error) {
+    toast(error.message || '复制失败，请手动复制', 'warn');
+  }
+}
+
 function renderContainerConnectionCell(container) {
   const metric = STATE.containerMetrics[container.id];
+  const copyTextValue = getContainerConnectionCopyText(container);
   return `<div class="container-ssh-cell">
-    <div class="td-mono container-ssh-command">${escapeHtml(container.ssh_cmd || '—')}</div>
+    <div class="container-ssh-head">
+      <div class="td-mono container-ssh-command">${escapeHtml(container.ssh_cmd || '—')}</div>
+      ${copyTextValue ? `<button class="container-copy-btn" type="button" onclick="copyContainerConnection('${container.id}')" title="复制 SSH 和端口映射">复制</button>` : ''}
+    </div>
     ${renderContainerPortMappings(container, metric)}
   </div>`;
 }
