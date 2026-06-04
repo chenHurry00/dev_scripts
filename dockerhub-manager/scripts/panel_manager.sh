@@ -240,13 +240,15 @@ install_panel_files() {
   ensure_python_venv
   ensure_panel_user
 
-  run_root mkdir -p "$PANEL_DIR/templates" "$CONFIG_DIR"
+  run_root mkdir -p "$PANEL_DIR/templates" "$PANEL_DIR/static" "$CONFIG_DIR"
   run_root install -m 0644 "$SOURCE_DIR/app.py" "$PANEL_DIR/app.py"
   run_root install -m 0644 "$SOURCE_DIR/requirements.txt" "$PANEL_DIR/requirements.txt"
   run_root install -m 0644 "$SOURCE_DIR/requirements-docs.txt" "$PANEL_DIR/requirements-docs.txt"
   run_root install -m 0644 "$SOURCE_DIR/templates/login.html" "$PANEL_DIR/templates/login.html"
   run_root install -m 0644 "$SOURCE_DIR/templates/dashboard.html" "$PANEL_DIR/templates/dashboard.html"
   run_root install -m 0644 "$SOURCE_DIR/templates/gpu_usage_portal.html" "$PANEL_DIR/templates/gpu_usage_portal.html"
+  run_root rm -rf "$PANEL_DIR/static"
+  run_root cp -a "$SOURCE_DIR/static" "$PANEL_DIR/static"
   run_root rm -rf "$DOCS_SOURCE_DIR"
   run_root cp -a "$SOURCE_DIR/docs-site" "$DOCS_SOURCE_DIR"
 

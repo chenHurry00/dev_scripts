@@ -3192,6 +3192,7 @@ td.td-mono { font-family: var(--mono); font-size: 12px; }
 <!-- ═══════ TOAST ═══════ -->
 <div id="toast-container"></div>
 
+<script src="/static/js/runtime_rings.js"></script>
 <script>
 /* ═══════════════════════════════════════════════
    STATE
@@ -3201,6 +3202,7 @@ const STATE = {
   role: '{{ role }}',
   servers: [],
   serverRuntimeSummary: null,
+  runtimeRingProgress: {},
   runtimeExpandedGpu: {},
   containers: [],
   containerMetrics: {},
@@ -3853,174 +3855,27 @@ function formatBytesPair(usedBytes, totalBytes) {
   return `${formatBytesCompact(used)} / ${formatBytesCompact(total)}`;
 }
 
-function clampRuntimePercent(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return 0;
-  return Math.max(0, Math.min(100, num));
-}
-
-function formatRuntimeFraction(current, total) {
-  const currentValue = Math.max(0, Number(current || 0));
-  const totalValue = Math.max(0, Number(total || 0));
-  return `${Math.round(currentValue)}/${Math.round(totalValue)}`;
-}
-
-function runtimeGpuDeviceState(device) {
-  const util = Number(device && device.utilization_gpu || 0);
-  const memoryPercent = Number(device && device.memory_usage_percent || 0);
-  if (util > 90 || memoryPercent > 90) return 'danger';
-  if (util > 60 || memoryPercent > 60) return 'warn';
-  return 'ok';
-}
-
-function runtimeGpuDeviceScore(device) {
-  const util = Number(device && device.utilization_gpu || 0);
-  const memoryPercent = Number(device && device.memory_usage_percent || 0);
-  const activeBias = device && device.active ? 1000 : 0;
-  return activeBias + Math.max(util, memoryPercent);
-}
-
-function sortRuntimeGpuDevices(devices) {
-  return [...(Array.isArray(devices) ? devices : [])].sort((left, right) => {
-    const diff = runtimeGpuDeviceScore(right) - runtimeGpuDeviceScore(left);
-    if (diff !== 0) return diff;
-    return String(left && left.id || '').localeCompare(String(right && right.id || ''), 'zh-CN', { numeric: true });
-  });
-}
-
 function renderRuntimeRing(metric) {
-  const tag = metric.toggle ? 'button' : 'div';
-  const toggleAttr = metric.toggle ? ` type="button" data-runtime-gpu-toggle="${escapeHtml(metric.serverId || '')}"` : '';
-  const toggleClass = metric.toggle ? ' runtime-ring-toggle' : '';
-  return `<${tag} class="runtime-ring runtime-ring--${metric.state || 'muted'}${toggleClass}"${toggleAttr} style="--ring-progress:${clampRuntimePercent(metric.progress).toFixed(1)}%">
-    <div class="runtime-ring-visual">
-      <div class="runtime-ring-core">
-        <div class="runtime-ring-value">${escapeHtml(metric.value || '—')}</div>
-        <div class="runtime-ring-label">${escapeHtml(metric.label || '')}</div>
-      </div>
-    </div>
-    <div class="runtime-ring-subtitle">${escapeHtml(metric.subtitle || '—')}</div>
-  </${tag}>`;
+  return RuntimeRingUtils.renderRing(metric, {
+    escapeHtml,
+    stateClassPrefix: 'runtime-ring--',
+  });
 }
 
 function buildServerRuntimeMetrics(server, options = {}) {
   const runtime = server && server.runtime ? server.runtime : {};
   const compact = !!options.compact;
   const gpuLimit = compact ? 2 : RUNTIME_GPU_COLLAPSED_COUNT;
-  if (!runtime || (!runtime.sampled_at && !runtime.error)) {
-    return [{
-      value: '—',
-      label: '运行状态',
-      subtitle: '等待采样',
-      progress: 0,
-      state: 'muted'
-    }];
-  }
-
-  const cpu = runtime.cpu || {};
-  const memory = runtime.memory || {};
-  const gpu = runtime.gpu || {};
-  const storage = runtime.storage || {};
-  const workspace = storage.workspace || {};
-  const metrics = [
-    {
-      value: formatPercent(cpu.usage_percent || 0),
-      label: 'CPU',
-      subtitle: `Load ${Number(cpu.load1 || 0).toFixed(1)} / ${cpu.cores || '—'}核`,
-      progress: cpu.usage_percent || 0,
-      state: cpu.state || 'muted'
-    },
-    {
-      value: formatPercent(memory.usage_percent || 0),
-      label: '内存',
-      subtitle: formatBytesPair(memory.used_bytes || 0, memory.total_bytes || 0),
-      progress: memory.usage_percent || 0,
-      state: memory.state || memory.overall_state || 'muted'
-    },
-    {
-      value: formatPercent(memory.swap_usage_percent || 0),
-      label: 'SWAP',
-      subtitle: Number(memory.swap_total_bytes || 0) > 0
-        ? formatBytesPair(memory.swap_used_bytes || 0, memory.swap_total_bytes || 0)
-        : '未启用',
-      progress: Number(memory.swap_total_bytes || 0) > 0 ? (memory.swap_usage_percent || 0) : 0,
-      state: memory.swap_state || 'ok'
-    }
-  ];
-
-  const dockerRoot = storage.docker_root || {};
-  metrics.push({
-    value: formatPercent(dockerRoot.usage_percent || 0),
-    label: 'Docker',
-    subtitle: Number(dockerRoot.total_bytes || 0) > 0
-      ? formatBytesPair(dockerRoot.used_bytes || 0, dockerRoot.total_bytes || 0)
-      : '未检测到',
-    progress: dockerRoot.usage_percent || 0,
-    state: dockerRoot.state || 'muted'
+  return RuntimeRingUtils.buildMetrics({
+    keyBase: String(server && server.id || 'server'),
+    serverId: server && server.id || '',
+    runtime,
+    expanded: !!STATE.runtimeExpandedGpu[server.id],
+    gpuLimit,
+    formatPercent,
+    formatBytesPair,
+    formatBytesCompact,
   });
-
-  metrics.push({
-    value: formatPercent(workspace.usage_percent || 0),
-    label: '工作区',
-    subtitle: Number(workspace.count || 0) > 1
-      ? `${workspace.count} 挂载点 | 空闲 ${formatBytesCompact(workspace.free_bytes || 0)}`
-      : (Number(workspace.total_bytes || 0) > 0 ? formatBytesPair(workspace.used_bytes || 0, workspace.total_bytes || 0) : '未配置'),
-    progress: workspace.usage_percent || 0,
-    state: workspace.state || 'ok'
-  });
-
-  if (Number(gpu.device_count || 0) > 0) {
-    metrics.push({
-      value: formatRuntimeFraction(gpu.active_device_count || 0, gpu.device_count || 0),
-      label: 'GPU汇总',
-      subtitle: `VRAM ${formatBytesPair(gpu.used_memory_bytes || 0, gpu.total_memory_bytes || 0)}`,
-      progress: Number(gpu.device_count || 0) > 0 ? (Number(gpu.active_device_count || 0) / Number(gpu.device_count || 1)) * 100 : 0,
-      state: gpu.state || 'ok'
-    });
-    const devices = sortRuntimeGpuDevices(gpu.devices || []);
-    const expanded = !!STATE.runtimeExpandedGpu[server.id];
-    const visibleDevices = expanded ? devices : devices.slice(0, gpuLimit);
-    visibleDevices.forEach(device => {
-      metrics.push({
-        value: formatPercent(device.utilization_gpu || 0),
-        label: `GPU-${device.id || '?'}`,
-        subtitle: formatBytesPair(device.memory_used_bytes || 0, device.memory_total_bytes || 0),
-        progress: Math.max(Number(device.utilization_gpu || 0), Number(device.memory_usage_percent || 0)),
-        state: runtimeGpuDeviceState(device)
-      });
-    });
-    if (!expanded && devices.length > gpuLimit) {
-      metrics.push({
-        value: `+${devices.length - gpuLimit}`,
-        label: 'GPU',
-        subtitle: '展开全部',
-        progress: 0,
-        state: 'muted',
-        toggle: true,
-        serverId: server.id
-      });
-    } else if (expanded && devices.length > gpuLimit) {
-      metrics.push({
-        value: '收起',
-        label: 'GPU',
-        subtitle: `已展开 ${devices.length} 张`,
-        progress: 0,
-        state: 'muted',
-        toggle: true,
-        serverId: server.id
-      });
-    }
-  } else {
-    metrics.push({
-      value: '0',
-      label: 'GPU',
-      subtitle: '无可用设备',
-      progress: 0,
-      state: 'warn'
-    });
-  }
-
-  return metrics;
 }
 
 function renderServerRuntimeRings(server, options = {}) {
@@ -4082,6 +3937,7 @@ function renderOverviewRuntimeCards() {
       ${renderServerRuntimeRings(server)}
     </div>`;
   }).join('');
+  RuntimeRingUtils.animateRingProgress(container, STATE.runtimeRingProgress);
 }
 
 document.addEventListener('click', event => {
@@ -4685,6 +4541,10 @@ function renderServersTable() {
     </tr>`).join('');
   if (cardList) {
     cardList.innerHTML = STATE.servers.map(server => renderServerCard(server, containerCountMap)).join('');
+  }
+  RuntimeRingUtils.animateRingProgress(tbody, STATE.runtimeRingProgress);
+  if (cardList) {
+    RuntimeRingUtils.animateRingProgress(cardList, STATE.runtimeRingProgress);
   }
 }
 

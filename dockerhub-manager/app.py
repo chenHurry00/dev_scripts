@@ -38,8 +38,8 @@ image_pull_tasks_lock = threading.Lock()
 data_lock = threading.RLock()
 
 # ── 内置配置（生产环境请替换为数据库） ──────────────────────────────────────
-DATA_FILE = Path("data.json")
 APP_DIR = Path(__file__).resolve().parent
+DATA_FILE = APP_DIR / "data.json"
 GPU_ACCOUNTING_DB = APP_DIR / "gpu_accounting.db"
 SERVER_RUNTIME_CACHE_FILE = APP_DIR / "server_runtime_cache.json"
 SSH_PORT_MIN = 32000
