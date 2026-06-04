@@ -36,6 +36,20 @@ read_env_value() {
   fi
 }
 
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  if [[ -f "$file" ]] && run_root grep -q "^${key}=" "$file"; then
+    run_root sed -i "s#^${key}=.*#${key}=${value}#" "$file"
+  else
+    run_root tee -a "$file" >/dev/null <<EOF
+${key}=${value}
+EOF
+  fi
+  run_root chmod 0600 "$file"
+}
+
 ensure_panel_env_defaults() {
   local current_docs_port
   local current_panel_access_token
@@ -701,6 +715,29 @@ panel_restart() {
   show_panel_firewall_hint
 }
 
+reset_panel_access_token() {
+  local new_token
+
+  if [[ ! -f "$PANEL_ENV" ]]; then
+    echo "错误：未检测到面板配置文件 ${PANEL_ENV}。请先安装中心面板。"
+    exit 37
+  fi
+
+  confirm_action \
+    "重置中心面板访问 Token 并重启面板" \
+    "${PANEL_ENV}、dockerhub-panel.service、dockerhub-gpu-portal.service" \
+    "旧访问链接会立即失效；需要使用新的 16 位 Token 链接重新访问面板。" || return 0
+
+  new_token="$(random_panel_access_token)"
+  set_env_value "$PANEL_ENV" "PANEL_ACCESS_TOKEN" "$new_token"
+  run_root systemctl restart dockerhub-panel
+  run_root systemctl restart dockerhub-gpu-portal
+
+  echo "✓ 面板访问 Token 已重置"
+  echo "  新 Token: ${new_token}"
+  show_panel_firewall_hint
+}
+
 agent_status() {
   run_root systemctl status dockerhub-agent --no-pager -l
   local agent_port
@@ -911,23 +948,24 @@ show_menu() {
   2. 重启中心面板
   3. 查看中心面板状态
   4. 查看中心面板日志
-  5. 停止中心面板并取消开机启动（保留数据）
-  6. 卸载中心面板
+  5. 重置面板访问 Token
+  6. 停止中心面板并取消开机启动（保留数据）
+  7. 卸载中心面板
 
 【本机 Docker Agent】
-  7. 安装/更新本机 Agent
-  8. 重启本机 Agent
-  9. 查看本机 Agent 状态
- 10. 查看本机 Agent 日志
- 11. 卸载本机 Agent
+  8. 安装/更新本机 Agent
+  9. 重启本机 Agent
+ 10. 查看本机 Agent 状态
+ 11. 查看本机 Agent 日志
+ 12. 卸载本机 Agent
 
 【文档站】
- 12. 安装/更新文档站
- 13. 重启文档站
- 14. 查看文档站状态
- 15. 查看文档站日志
- 16. 停止文档站并取消开机启动（保留数据）
- 17. 卸载文档站
+ 13. 安装/更新文档站
+ 14. 重启文档站
+ 15. 查看文档站状态
+ 16. 查看文档站日志
+ 17. 停止文档站并取消开机启动（保留数据）
+ 18. 卸载文档站
 
   0. 退出
 EOF
@@ -937,25 +975,26 @@ run_menu() {
   local choice
   while true; do
     show_menu
-    read -r -p "请选择 [0-17]: " choice
+    read -r -p "请选择 [0-18]: " choice
     case "$choice" in
       1) install_or_update_panel ;;
       2) panel_restart ;;
       3) panel_status ;;
       4) panel_logs ;;
-      5) disable_panel ;;
-      6) uninstall_panel ;;
-      7) install_local_agent ;;
-      8) agent_restart ;;
-      9) agent_status ;;
-      10) agent_logs ;;
-      11) uninstall_local_agent ;;
-      12) install_or_update_docs ;;
-      13) docs_restart ;;
-      14) docs_status ;;
-      15) docs_logs ;;
-      16) disable_docs ;;
-      17) uninstall_docs ;;
+      5) reset_panel_access_token ;;
+      6) disable_panel ;;
+      7) uninstall_panel ;;
+      8) install_local_agent ;;
+      9) agent_restart ;;
+      10) agent_status ;;
+      11) agent_logs ;;
+      12) uninstall_local_agent ;;
+      13) install_or_update_docs ;;
+      14) docs_restart ;;
+      15) docs_status ;;
+      16) docs_logs ;;
+      17) disable_docs ;;
+      18) uninstall_docs ;;
       0) exit 0 ;;
       *) echo "无效选项: ${choice}" ;;
     esac
@@ -967,6 +1006,7 @@ case "${1:-menu}" in
   menu) run_menu ;;
   install|update) install_or_update_panel ;;
   restart) panel_restart ;;
+  reset-panel-token) reset_panel_access_token ;;
   status) panel_status ;;
   logs) panel_logs ;;
   disable) disable_panel ;;
@@ -983,7 +1023,7 @@ case "${1:-menu}" in
   disable-docs) disable_docs ;;
   uninstall-docs) uninstall_docs ;;
   *)
-    echo "用法: bash scripts/panel_manager.sh [menu|install|update|restart|status|logs|disable|uninstall|install-local-agent|agent-restart|agent-status|agent-logs|uninstall-local-agent|install-docs|update-docs|docs-restart|docs-status|docs-logs|disable-docs|uninstall-docs]"
+    echo "用法: bash scripts/panel_manager.sh [menu|install|update|restart|reset-panel-token|status|logs|disable|uninstall|install-local-agent|agent-restart|agent-status|agent-logs|uninstall-local-agent|install-docs|update-docs|docs-restart|docs-status|docs-logs|disable-docs|uninstall-docs]"
     exit 1
     ;;
 esac
