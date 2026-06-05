@@ -3429,6 +3429,8 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
 
 document.getElementById('ctr-server').addEventListener('change', loadCreateContainerServerData);
 document.getElementById('ctr-image-select').addEventListener('change', toggleCustomContainerImage);
+document.getElementById('ctr-user').addEventListener('input', refreshRegisteredMountPreview);
+document.getElementById('ctr-name').addEventListener('input', refreshRegisteredMountPreview);
 
 async function openCreateContainerModal() {
   openModal('modal-create-ctr');
@@ -3585,6 +3587,9 @@ async function loadSelectedServerDefaults() {
     const data = await api(`/api/servers/${sid}/defaults`);
     if (!data.ok) {
       throw new Error(data.error || '服务器默认配置读取失败');
+    }
+    if (server && Array.isArray(data.mount_roots) && data.mount_roots.length) {
+      server.mount_roots = data.mount_roots;
     }
     document.getElementById('ctr-cpu').value = data.cpu;
     document.getElementById('ctr-mem').value = data.memory;
@@ -4618,21 +4623,64 @@ function ensureContainerMetricsTimer() {
   }, 5000);
 }
 
-function renderRegisteredMounts(roots) {
+function getRegisteredMountPreviewName() {
+  return document.getElementById('ctr-user').value.trim()
+    || document.getElementById('ctr-name').value.trim()
+    || 'user';
+}
+
+function buildRegisteredMountHostPath(root, previewName) {
+  if (root.readonly) {
+    return root.host_path;
+  }
+  return `${String(root.host_path || '').replace(/\/$/, '')}/${previewName}`;
+}
+
+function getCurrentCreateContainerMountRoots() {
+  const sid = document.getElementById('ctr-server').value;
+  const server = STATE.servers.find(item => item.id === sid);
+  return Array.isArray(server && server.mount_roots) ? server.mount_roots : [];
+}
+
+function refreshRegisteredMountPreview() {
+  const roots = getCurrentCreateContainerMountRoots();
+  if (!roots.length) return;
+  renderRegisteredMounts(roots, { preserveState: true });
+}
+
+function renderRegisteredMounts(roots, options = {}) {
   const container = document.getElementById('ctr-registered-mounts');
-  const user = document.getElementById('ctr-user').value || document.getElementById('ctr-name').value || 'user';
+  const previewName = getRegisteredMountPreviewName();
+  const previousRows = options.preserveState
+    ? [...container.querySelectorAll('.check-row')].map(row => {
+        const hostInput = row.querySelector('.registered-mount-host');
+        return {
+          checked: row.querySelector('.registered-mount-check').checked,
+          hostPath: hostInput.value,
+          autoHostPath: hostInput.dataset.autoHostPath || '',
+          containerPath: row.querySelector('.registered-mount-container').value,
+          mode: row.querySelector('.registered-mount-mode').value
+        };
+      })
+    : [];
   if (!roots.length) {
     container.innerHTML = '<div class="form-hint">该服务器尚未注册挂载根目录。</div>';
     return;
   }
   container.innerHTML = roots.map((root, index) => {
-    const hostPath = root.readonly ? root.host_path : `${root.host_path.replace(/\/$/, '')}/${user}`;
-    const mode = root.readonly ? 'ro' : 'rw';
+    const previous = previousRows[index] || {};
+    const autoHostPath = buildRegisteredMountHostPath(root, previewName);
+    const hostPath = previous.hostPath && previous.hostPath !== previous.autoHostPath
+      ? previous.hostPath
+      : autoHostPath;
+    const mode = root.readonly ? 'ro' : (previous.mode || 'rw');
+    const checked = typeof previous.checked === 'boolean' ? previous.checked : index === 0;
+    const containerPath = previous.containerPath || root.default_container_path || '/workspace';
     return `<div class="check-row">
-      <input type="checkbox" class="registered-mount-check" ${index === 0 ? 'checked' : ''}>
+      <input type="checkbox" class="registered-mount-check" ${checked ? 'checked' : ''}>
       <div><strong>${escapeHtml(root.name || root.host_path)}</strong>
-        <input class="form-input registered-mount-host" value="${escapeHtml(hostPath)}"></div>
-      <input class="form-input registered-mount-container" value="${escapeHtml(root.default_container_path || '/workspace')}">
+        <input class="form-input registered-mount-host" value="${escapeHtml(hostPath)}" data-auto-host-path="${escapeHtml(autoHostPath)}"></div>
+      <input class="form-input registered-mount-container" value="${escapeHtml(containerPath)}">
       <select class="form-select registered-mount-mode" ${root.readonly ? 'disabled' : ''}>
         <option value="rw" ${mode === 'rw' ? 'selected' : ''}>rw</option>
         <option value="ro" ${mode === 'ro' ? 'selected' : ''}>ro</option>
